@@ -1,0 +1,425 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
+import { Check, ChevronDown, ExternalLink, X } from 'lucide-react'
+import { formatHotkey, getPlatform, type SelectOption } from './utils'
+import { Button } from '../components/Button'
+
+const MENU_GAP = 6
+const MENU_MARGIN = 8
+const MENU_MAX_HEIGHT = 260
+
+function useSelectMenuRect(
+  open: boolean,
+  value: string,
+  optionsLength: number,
+  triggerRef: RefObject<HTMLButtonElement | null>,
+) {
+  const [menuRect, setMenuRect] = useState<{
+    left: number
+    top?: number
+    bottom?: number
+    width: number
+    maxHeight: number
+  }>({ left: 0, top: 0, width: 0, maxHeight: MENU_MAX_HEIGHT })
+
+  const updateMenuRect = useCallback(() => {
+    const trigger = triggerRef.current
+    if (!trigger) return
+    const rect = trigger.getBoundingClientRect()
+    const viewportH = window.innerHeight
+    const spaceBelow = viewportH - rect.bottom - MENU_GAP - MENU_MARGIN
+    const spaceAbove = rect.top - MENU_GAP - MENU_MARGIN
+    // 默认向下展开；下方空间不足且上方更宽裕时向上翻转。
+    const flipUp = spaceBelow < MENU_MAX_HEIGHT && spaceAbove > spaceBelow
+    const available = Math.max(flipUp ? spaceAbove : spaceBelow, 0)
+    const maxHeight = Math.max(Math.min(MENU_MAX_HEIGHT, available), 80)
+    if (flipUp) {
+      // 用 bottom 定位让菜单底边贴着按钮向上生长，避免 top 计算后恒等于 MENU_MARGIN 导致飞到窗口顶部。
+      setMenuRect({ left: rect.left, bottom: viewportH - rect.top + MENU_GAP, width: rect.width, maxHeight })
+    } else {
+      setMenuRect({ left: rect.left, top: rect.bottom + MENU_GAP, width: rect.width, maxHeight })
+    }
+  }, [triggerRef])
+
+  useLayoutEffect(() => {
+    if (open) updateMenuRect()
+  }, [open, value, optionsLength, updateMenuRect])
+
+  return { menuRect, updateMenuRect }
+}
+
+/**
+ * 开关切换组件 — on 态用 brand 蓝，slider 加双层阴影
+ */
+export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      role="switch"
+      aria-checked={checked}
+      className={`kv-toggle ${checked ? 'on' : ''}`}
+      data-tauri-drag-region="false"
+    />
+  )
+}
+
+/**
+ * 下拉选择 — 自绘菜单，避免 macOS 原生 select 的系统高亮/勾选反馈和受控状态不同步。
+ */
+export function Select({ value, onChange, options, className = '' }: {
+  value: string
+  onChange: (v: string) => void
+  options: SelectOption[]
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const selected = options.find(opt => opt.value === value)
+  const displayLabel = selected?.label || value
+  const displayTitle = selected?.title || displayLabel
+  const disabled = options.length === 0
+  const { menuRect, updateMenuRect } = useSelectMenuRect(open, value, options.length, triggerRef)
+
+  useEffect(() => {
+    if (!open) return
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false)
+        triggerRef.current?.focus()
+      }
+    }
+    const handleLayoutChange = () => updateMenuRect()
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('resize', handleLayoutChange)
+    window.addEventListener('scroll', handleLayoutChange, true)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('resize', handleLayoutChange)
+      window.removeEventListener('scroll', handleLayoutChange, true)
+    }
+  }, [open, updateMenuRect])
+
+  return (
+    <div className={`relative ${className}`}>
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen(v => !v)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            setOpen(true)
+          }
+        }}
+        className="kv-select kv-select-button relative w-full h-[30px] text-left disabled:opacity-50 disabled:cursor-not-allowed"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={displayTitle}
+        data-tauri-drag-region="false"
+      >
+        <span className="block truncate">{displayLabel}</span>
+        <ChevronDown
+          size={14}
+          strokeWidth={2.25}
+          className={`absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 dark:text-neutral-500 transition-transform ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          role="listbox"
+          className="kv-select-menu fixed z-[1000] overflow-y-auto custom-scrollbar p-1"
+          style={{ left: menuRect.left, top: menuRect.top, bottom: menuRect.bottom, width: menuRect.width, maxHeight: menuRect.maxHeight }}
+          data-tauri-drag-region="false"
+        >
+          {options.map(opt => {
+            const active = opt.value === value
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  onChange(opt.value)
+                  setOpen(false)
+                  triggerRef.current?.focus()
+                }}
+                title={opt.title || opt.label}
+                className={`relative flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 pr-8 text-left text-[12.5px] leading-5 transition-colors ${
+                  active
+                    ? 'bg-blue-600 text-white'
+                    : 'text-neutral-800 dark:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08]'
+                }`}
+                data-tauri-drag-region="false"
+              >
+                <span className="min-w-0 flex-1 truncate">{opt.label}</span>
+                {active && (
+                  <Check
+                    size={14}
+                    strokeWidth={2.5}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2"
+                  />
+                )}
+              </button>
+            )
+          })}
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
+}
+
+/**
+ * 文本输入 — 默认 sans，需要等宽时调用方自行加 font-mono
+ */
+export function Input({ value, onChange, type = 'text', placeholder = '', className = '', mono = false, ...props }: {
+  value: string
+  onChange: (v: string) => void
+  type?: string
+  placeholder?: string
+  className?: string
+  /** 启用 font-mono（仅 baseUrl/apiKey/model 名等代码型字段使用） */
+  mono?: boolean
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'>) {
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      className={`kv-input w-full ${mono ? 'mono' : ''} ${className}`}
+      data-tauri-drag-region="false"
+      {...props}
+    />
+  )
+}
+
+/**
+ * 多行文本输入 — 默认 sans
+ */
+export function TextArea({ value, onChange, placeholder = '', rows = 2, mono = false }: {
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  rows?: number
+  mono?: boolean
+}) {
+  return (
+    <textarea
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      rows={rows}
+      className={`kv-textarea w-full ${mono ? 'mono' : ''}`}
+      data-tauri-drag-region="false"
+    />
+  )
+}
+
+/**
+ * 字段标签
+ */
+export function Label({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <label className={`kv-field-label ${className}`}>
+      {children}
+    </label>
+  )
+}
+
+/**
+ * 设置项行（左 label + 可选 description，右控件）
+ */
+export function SettingRow({ label, description, children, className = '', stack = false }: {
+  label: ReactNode
+  description?: string
+  children: ReactNode
+  className?: string
+  stack?: boolean
+}) {
+  return (
+    <div className={`${stack ? 'kv-row-stack' : 'kv-row'} ${className}`}>
+      <div className="kv-row-text">
+        <span className="kv-row-label">{label}</span>
+        {description && (
+          <p className="kv-row-desc">{description}</p>
+        )}
+      </div>
+      {stack ? children : <div className="kv-row-control">{children}</div>}
+    </div>
+  )
+}
+
+export function SettingsGroup({ title, children, className = '' }: {
+  title?: ReactNode
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <section className={`kv-group ${className}`}>
+      {title && <div className="kv-group-title">{title}</div>}
+      {children}
+    </section>
+  )
+}
+
+/**
+ * 权限状态项（macOS）
+ */
+export function PermissionItem({
+  label,
+  granted,
+  grantedText,
+  missingText,
+  actionLabel,
+  onOpen,
+}: {
+  label: string
+  granted: boolean
+  grantedText: string
+  missingText: string
+  actionLabel: string
+  onOpen: () => void
+}) {
+  return (
+    <div className="kv-row">
+      <div className="kv-row-text flex items-center gap-2.5">
+        <span className={`relative flex h-2 w-2 shrink-0`}>
+          {!granted && (
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-50" />
+          )}
+          <span className={`relative inline-flex rounded-full h-2 w-2 ${granted ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+        </span>
+        <div className="min-w-0">
+          <p className="kv-row-label">{label}</p>
+          <p className={`text-[11px] mt-0.5 ${granted ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+            {granted ? grantedText : missingText}
+          </p>
+        </div>
+      </div>
+      {!granted && (
+        <Button
+          size="sm"
+          onClick={onOpen}
+          data-tauri-drag-region="false"
+        >
+          <ExternalLink size={11} />
+          {actionLabel}
+        </Button>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 键盘按键徽章
+ */
+export function KeyBadge({ children }: { children: ReactNode }) {
+  return (
+    <kbd
+      className="kv-kbd"
+    >
+      {children}
+    </kbd>
+  )
+}
+
+/**
+ * 快捷键展示
+ */
+export function HotkeyDisplay({ hotkey }: { hotkey: string }) {
+  const platform = getPlatform()
+  const keys = formatHotkey(hotkey, platform)
+  return (
+    <div className="flex items-center gap-1">
+      {keys.map((k, i) => (
+        <KeyBadge key={i}>{k}</KeyBadge>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * 快捷键输入(含录制态)
+ * onClear / clearLabel: 提供时,值非空且非录制态会渲染 X 按钮以清空(给"想关掉某个功能的热键"留出口);留空则不显示
+ * error: 客户端冲突等校验消息,以红色小字显示在输入框下方
+ */
+export function HotkeyInput({
+  value,
+  placeholder,
+  recording,
+  onToggleRecording,
+  recordLabel,
+  recordingLabel,
+  recordingPlaceholder,
+  onClear,
+  clearLabel,
+  error,
+}: {
+  value: string
+  placeholder: string
+  recording: boolean
+  onToggleRecording: () => void
+  recordLabel: string
+  recordingLabel: string
+  recordingPlaceholder: string
+  onClear?: () => void
+  clearLabel?: string
+  error?: string
+}) {
+  const showClear = !!onClear && !!value && !recording
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2">
+        <div
+          className={`kv-hotkey flex-1 ${recording ? 'recording' : ''} ${error ? 'error' : ''}`}
+        >
+          {recording ? (
+            <span className="kv-hotkey-record-label animate-pulse">{recordingPlaceholder}</span>
+          ) : value ? (
+            <HotkeyDisplay hotkey={value} />
+          ) : (
+            <span className="text-[12px] text-neutral-400 dark:text-neutral-500">{placeholder}</span>
+          )}
+          {showClear && (
+            <button
+              type="button"
+              onClick={onClear}
+              title={clearLabel}
+              aria-label={clearLabel}
+              className="kv-hotkey-clear"
+              data-tauri-drag-region="false"
+            >
+              <X size={12} strokeWidth={2.5} />
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onToggleRecording}
+          className={`kv-btn ${recording ? 'accent' : ''}`}
+          data-tauri-drag-region="false"
+        >
+          {recording ? recordingLabel : recordLabel}
+        </button>
+      </div>
+      {error && (
+        <p className="text-[11px] text-red-500 dark:text-red-400 leading-snug">{error}</p>
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,231 @@
+{
+  "schema_version": "1.0",
+  "status": "planning_contract",
+  "description": "Synthetic executable scenarios for the Beefex desktop-v1 auth, discovery, credential and inference decision. This file performs no I/O and is not a runtime truth owner.",
+  "invariant_sources": [
+    "../prd.md#p0-02-beefapi-login-without-provider-setup",
+    "../prd.md#p0-03-server-authoritative-group-and-model",
+    "../design.md#12-executable-scenario-contract"
+  ],
+  "cases": [
+    {
+      "id": "authorized_pro_default_model_available",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-pro"],
+        "auth_terminal_state": "approved",
+        "token_group": "gpt-pro",
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.6-sol"],
+        "credential_store_result": "stored"
+      },
+      "expected": {
+        "decision": "allow",
+        "reason_code": "authorized",
+        "token_created": true,
+        "token_revoked": false,
+        "credential_stored": true,
+        "inference_allowed": true,
+        "effective_group": "gpt-pro",
+        "effective_model": "gpt-5.6-sol"
+      }
+    },
+    {
+      "id": "desktop_client_requests_legacy_group",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-plus",
+        "user_entitlements": ["gpt-pro", "gpt-plus"],
+        "auth_terminal_state": "pending",
+        "token_group": null,
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.6-sol"],
+        "credential_store_result": "not_attempted"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "client_group_forbidden",
+        "token_created": false,
+        "token_revoked": false,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": null,
+        "effective_model": null
+      }
+    },
+    {
+      "id": "pro_entitlement_missing",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-plus"],
+        "auth_terminal_state": "approved",
+        "token_group": null,
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": [],
+        "credential_store_result": "not_attempted"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "entitlement_required",
+        "token_created": false,
+        "token_revoked": false,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": null,
+        "effective_model": null
+      }
+    },
+    {
+      "id": "device_authorization_denied",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-pro"],
+        "auth_terminal_state": "denied",
+        "token_group": null,
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.6-sol"],
+        "credential_store_result": "not_attempted"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "authorization_denied",
+        "token_created": false,
+        "token_revoked": false,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": null,
+        "effective_model": null
+      }
+    },
+    {
+      "id": "device_authorization_expired",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-pro"],
+        "auth_terminal_state": "expired",
+        "token_group": null,
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.6-sol"],
+        "credential_store_result": "not_attempted"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "authorization_expired",
+        "token_created": false,
+        "token_revoked": false,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": null,
+        "effective_model": null
+      }
+    },
+    {
+      "id": "server_default_model_not_available",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-pro"],
+        "auth_terminal_state": "approved",
+        "token_group": "gpt-pro",
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.5"],
+        "credential_store_result": "not_attempted"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "default_model_unavailable",
+        "token_created": false,
+        "token_revoked": false,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": "gpt-pro",
+        "effective_model": null
+      }
+    },
+    {
+      "id": "untrusted_base_url_rejected_by_client",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-pro"],
+        "auth_terminal_state": "approved",
+        "token_group": "gpt-pro",
+        "base_url": "https://attacker.example/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.6-sol"],
+        "credential_store_result": "not_attempted",
+        "token_cleanup_result": "revoked"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "untrusted_base_url",
+        "token_created": true,
+        "token_revoked": true,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": "gpt-pro",
+        "effective_model": null
+      }
+    },
+    {
+      "id": "keychain_final_write_failure_revokes_token",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-pro"],
+        "auth_terminal_state": "approved",
+        "token_group": "gpt-pro",
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.6-sol"],
+        "credential_store_result": "failed",
+        "token_cleanup_result": "revoked"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "credential_store_failed",
+        "token_created": true,
+        "token_revoked": true,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": "gpt-pro",
+        "effective_model": null
+      }
+    },
+    {
+      "id": "runtime_credential_rejected_requires_reauthorization",
+      "input": {
+        "client_id": "beefex-desktop-v1",
+        "requested_group": "gpt-pro",
+        "user_entitlements": ["gpt-pro"],
+        "auth_terminal_state": "approved",
+        "token_group": "gpt-pro",
+        "base_url": "https://beefapi.com/v1",
+        "default_model": "gpt-5.6-sol",
+        "allowed_models": ["gpt-5.6-sol"],
+        "credential_store_result": "stored",
+        "runtime_credential_state": "revoked"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "reauthorization_required",
+        "token_created": true,
+        "token_revoked": true,
+        "credential_stored": false,
+        "inference_allowed": false,
+        "effective_group": "gpt-pro",
+        "effective_model": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+Beefex
+Copyright (c) 2026 BeefAPI Contributors
+
+This software is a modified derivative of Kivio:
+
+  Upstream project: https://github.com/ZMGID/kivio
+  Pinned foundation commit: 77ec2044f3b15e0c581725d1038d951f5ed5c3b3
+  Upstream copyright: Copyright (c) ZM and Kivio contributors
+  Upstream license: GNU General Public License v3.0 or later
+
+Beefex modifications include product identity and packaging, an isolated
+application-data namespace, BeefAPI integration work, Responses transport,
+and the coding-agent product flow described in this repository.
+
+The complete corresponding source for a distributed Beefex build must be made
+available under GPL-3.0-or-later together with this notice and the LICENSE file.
+The exact source revision and any build instructions used for that binary must
+be identified at distribution time.
+
+Kivio and its contributors do not endorse Beefex. Internal crate, binary,
+module, protocol, and compatibility identifiers may retain the Kivio name;
+those identifiers do not change the derivative work's license or attribution.
+
+This software is provided without warranty; see LICENSE for the full terms.
+
+BF Labs UI source influence
+  Project: https://github.com/Sunnyender-org/bflabs-ui
+  Source revision used for the first vertical slice: 54997785cc4076a5e23f4cd31732065945442cad
+  License: MIT
+  Copyright (c) 2026 BF Labs
+
+The `src/bflabs` wrappers and tokens are adapted for the Beefex product shell.
+The BF Labs name and brand mark are not relicensed by the MIT component code.
+
+Base UI
+  Project: https://base-ui.com/
+  Package: @base-ui/react 1.7.0
+  License: MIT
+
+Base UI is an implementation detail behind the Beefex BFLabs wrappers.
+
+Pi coding agent
+  Project: https://github.com/earendil-works/pi
+  Package: @earendil-works/pi-coding-agent 0.84.1
+  License: MIT
+
+Beefex invokes Pi through its RPC interface and builds the exact 0.84.1 runtime
+for the macOS application together with Beefex-owned policy and managed-provider
+extensions. Publication of this corresponding source does not publish or approve
+a binary release. Distributed binaries must retain the complete applicable
+notices and satisfy the GPL source requirements.

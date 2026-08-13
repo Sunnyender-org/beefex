@@ -1,0 +1,966 @@
+use std::{future::Future, pin::Pin};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::mcp::{self, types::ChatToolArtifact, ChatToolDefinition};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRole {
+    User,
+    Assistant,
+    Tool,
+}
+
+impl ModelRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelRole::User => "user",
+            ModelRole::Assistant => "assistant",
+            ModelRole::Tool => "tool",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MessagePart {
+    Text {
+        text: String,
+    },
+    Image {
+        mime_type: String,
+        data: String,
+    },
+    ImageUrl {
+        url: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: Value,
+        arguments_raw: String,
+        /// Provider-specific opaque signature that must be echoed back when this
+        /// tool call is replayed (Gemini 3.x `thoughtSignature`: required on
+        /// `functionCall` parts in follow-up requests, else 400). Other providers
+        /// leave this `None` and ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+        is_error: bool,
+        artifacts: Vec<ChatToolArtifact>,
+    },
+    Reasoning {
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelMessage {
+    pub role: ModelRole,
+    pub content: Vec<MessagePart>,
+}
+
+impl ModelMessage {
+    pub fn text(role: ModelRole, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: vec![MessagePart::Text { text: text.into() }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTool {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub server_id: Option<String>,
+    pub server_name: Option<String>,
+    pub input_schema: Value,
+    pub sensitive: bool,
+}
+
+impl ModelTool {
+    pub fn openai_tool_name(&self) -> String {
+        match self.source.as_str() {
+            "native" | "skill" | "mixer" => mcp::types::apply_reserved_wire_alias(
+                &mcp::types::sanitize_openai_tool_name(&self.name),
+            ),
+            _ => mcp::types::sanitize_openai_tool_name(&self.id),
+        }
+    }
+
+    pub fn to_openai_tool(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.openai_tool_name(),
+                "description": self.description,
+                "parameters": self.input_schema,
+            }
+        })
+    }
+
+    /// OpenAI **Responses** API tool shape: flat `name`/`description`/`parameters`,
+    /// not nested under a `function` object (unlike Chat Completions' `to_openai_tool`).
+    pub fn to_openai_responses_tool(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "name": self.openai_tool_name(),
+            "description": self.description,
+            "parameters": self.input_schema,
+        })
+    }
+}
+
+impl From<&ChatToolDefinition> for ModelTool {
+    fn from(tool: &ChatToolDefinition) -> Self {
+        Self {
+            id: tool.id.clone(),
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            source: tool.source.clone(),
+            server_id: tool.server_id.clone(),
+            server_name: tool.server_name.clone(),
+            input_schema: tool.input_schema.clone(),
+            sensitive: tool.sensitive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateOptions {
+    /// 显式的单次请求覆盖；None 时由 provider/model 元数据解析，仍缺省则不发送。
+    pub temperature: Option<f64>,
+    pub max_tokens: u32,
+    pub thinking_enabled: bool,
+    /// 每对话「思考等级」(`"low"|"medium"|"high"`)。`None` = 未显式设置，维持现状
+    /// （仅受 `thinking_enabled` 控制，不发任何 effort/reasoning 字段）。仅在用户显式
+    /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic→`output_config.effort`。
+    #[serde(default)]
+    pub thinking_level: Option<String>,
+    #[serde(default)]
+    pub provider_options: Value,
+}
+
+impl Default for GenerateOptions {
+    fn default() -> Self {
+        Self {
+            temperature: None,
+            max_tokens: 8192,
+            thinking_enabled: true,
+            thinking_level: None,
+            provider_options: Value::Object(Default::default()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestMetadata {
+    pub label: String,
+    #[serde(default)]
+    pub usage_source: Option<String>,
+    #[serde(default)]
+    pub usage_operation: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GenerateRequestContext {
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+}
+
+impl GenerateRequestContext {
+    pub fn new(conversation_id: Option<&str>, message_id: Option<&str>) -> Self {
+        Self {
+            conversation_id: conversation_id.map(str::to_string),
+            message_id: message_id.map(str::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateRequest {
+    pub model: String,
+    pub system: String,
+    pub messages: Vec<ModelMessage>,
+    pub tools: Vec<ModelTool>,
+    pub options: GenerateOptions,
+    pub metadata: RequestMetadata,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingToolCall {
+    pub id: String,
+    pub function_name: String,
+    pub arguments: Value,
+    pub arguments_raw: String,
+    pub arguments_parse_error: Option<String>,
+    /// Provider-specific opaque signature echoed back on replay (Gemini 3.x
+    /// `thoughtSignature`; other providers leave `None`). Rides through the
+    /// stream accumulator + provider_messages so tool-call turns replay intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateOutput {
+    pub text: String,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<PendingToolCall>,
+    pub usage: Option<ModelUsage>,
+    pub finish_reason: Option<String>,
+    pub provider_messages: Vec<Value>,
+    pub cancelled: bool,
+}
+
+impl GenerateOutput {
+    pub fn text(text: String, reasoning: Option<String>, provider_message: Value) -> Self {
+        Self {
+            text,
+            reasoning,
+            tool_calls: Vec::new(),
+            usage: None,
+            finish_reason: None,
+            provider_messages: vec![provider_message],
+            cancelled: false,
+        }
+    }
+
+    pub fn cancelled(text: String, reasoning: Option<String>) -> Self {
+        Self {
+            text,
+            reasoning,
+            tool_calls: Vec::new(),
+            usage: None,
+            finish_reason: Some("cancelled".to_string()),
+            provider_messages: Vec::new(),
+            cancelled: true,
+        }
+    }
+
+    pub fn to_openai_compatible_message(&self) -> Value {
+        if let Some(message) = self.provider_messages.first() {
+            return message.clone();
+        }
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": if self.text.is_empty() { Value::Null } else { Value::String(self.text.clone()) },
+        });
+        if let Some(reasoning) = self
+            .reasoning
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            message["reasoning_content"] = Value::String(reasoning.to_string());
+        }
+        if !self.tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(
+                self.tool_calls
+                    .iter()
+                    .map(|call| {
+                        serde_json::json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.function_name,
+                                "arguments": call.arguments_raw,
+                            }
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        message
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamPart {
+    TextDelta { delta: String },
+    ReasoningDelta { delta: String },
+    ToolCallStart { id: String, name: String },
+    ToolCallDelta { id: String, delta: String },
+    ToolCallDone { call: PendingToolCall },
+    Finish { reason: String, full: String },
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelErrorKind {
+    Other,
+    StreamReadInterrupted,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelError {
+    pub message: String,
+    pub kind: ModelErrorKind,
+}
+
+impl ModelError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ModelErrorKind::Other,
+        }
+    }
+
+    pub fn with_kind(message: impl Into<String>, kind: ModelErrorKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+        }
+    }
+
+    pub fn is_stream_read_interrupted(&self) -> bool {
+        self.kind == ModelErrorKind::StreamReadInterrupted
+    }
+}
+
+pub fn stream_read_error(label: &str, err: &reqwest::Error) -> ModelError {
+    let reason = if err.is_timeout() {
+        "the provider stream timed out"
+    } else if err.is_connect() {
+        "the provider connection was interrupted"
+    } else if err.is_decode() {
+        "the provider sent an incomplete or invalid encoded stream chunk"
+    } else {
+        "the provider stream ended unexpectedly"
+    };
+    ModelError::with_kind(
+        format!(
+            "{label} 流式响应读取中断：{reason}。这通常是临时的网络、代理或模型服务流式断包问题，请重试。"
+        ),
+        ModelErrorKind::StreamReadInterrupted,
+    )
+}
+
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ModelError {}
+
+impl From<String> for ModelError {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for ModelError {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+pub trait StreamSink: Send {
+    fn emit(&mut self, part: StreamPart) -> Result<(), ModelError>;
+}
+
+impl<F> StreamSink for F
+where
+    F: FnMut(StreamPart) -> Result<(), ModelError> + Send,
+{
+    fn emit(&mut self, part: StreamPart) -> Result<(), ModelError> {
+        self(part)
+    }
+}
+
+pub type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ModelError>> + Send + 'a>>;
+
+pub trait LanguageModelProvider {
+    fn generate<'a>(&'a self, request: GenerateRequest) -> ModelFuture<'a, GenerateOutput>;
+    fn stream<'a>(
+        &'a self,
+        request: GenerateRequest,
+        sink: &'a mut (dyn StreamSink + Send),
+    ) -> ModelFuture<'a, GenerateOutput>;
+}
+
+pub fn parse_tool_arguments(arguments_raw: &str) -> (Value, Option<String>) {
+    let raw = if arguments_raw.trim().is_empty() {
+        "{}"
+    } else {
+        arguments_raw
+    };
+    match serde_json::from_str(raw) {
+        Ok(arguments) => (arguments, None),
+        Err(err) => (
+            Value::Null,
+            Some(format!(
+                "Tool arguments JSON is invalid or incomplete: {err}"
+            )),
+        ),
+    }
+}
+
+/// 把 OpenAI `function.arguments` 归一成 raw JSON 字符串。
+///
+/// OpenAI 规范里它是 JSON **字符串**，但不少 OpenAI 兼容网关（含部分 codex / 代理模型，
+/// 如 `gpt-*-codex-*`）直接发已解析的 JSON **对象**。只认字符串会把对象静默丢成 `{}`，
+/// 于是 `query` 等必填参数缺失、schema 校验反复失败、模型空手重试形成死循环。两种形态都接：
+/// 字符串原样返回，对象 / 数组 / 其它序列化成字符串，null / 缺失回退 `{}`。
+pub fn tool_arguments_to_raw(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Null) | None => "{}".to_string(),
+        Some(other) => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
+pub fn generate_request_from_openai_messages(
+    model: &str,
+    messages: Vec<Value>,
+    tools: Option<&[ChatToolDefinition]>,
+    options: GenerateOptions,
+    label: &str,
+    context: GenerateRequestContext,
+) -> GenerateRequest {
+    let mut system_parts = Vec::new();
+    let mut model_messages = Vec::new();
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if role == "system" {
+            if let Some(content) = openai_message_text_content(&message) {
+                system_parts.push(content);
+            }
+            continue;
+        }
+        if let Some(model_message) = model_message_from_openai_message(&message) {
+            model_messages.push(model_message);
+        }
+    }
+    GenerateRequest {
+        model: model.to_string(),
+        system: system_parts.join("\n\n"),
+        messages: model_messages,
+        tools: tools
+            .unwrap_or_default()
+            .iter()
+            .map(ModelTool::from)
+            .collect(),
+        options,
+        metadata: RequestMetadata {
+            label: label.to_string(),
+            conversation_id: context.conversation_id,
+            message_id: context.message_id,
+            ..RequestMetadata::default()
+        },
+    }
+}
+
+pub fn model_messages_from_openai_messages(messages: Vec<Value>) -> Vec<ModelMessage> {
+    messages
+        .into_iter()
+        .filter_map(|message| model_message_from_openai_message(&message))
+        .collect()
+}
+
+pub fn openai_messages_from_generate_request(request: &GenerateRequest) -> Vec<Value> {
+    let mut messages = Vec::new();
+    if !request.system.trim().is_empty() {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": request.system,
+        }));
+    }
+    for message in &request.messages {
+        messages.extend(openai_messages_from_model_message(message));
+    }
+    messages
+}
+
+pub fn openai_messages_from_model_messages(messages: &[ModelMessage]) -> Vec<Value> {
+    messages
+        .iter()
+        .flat_map(openai_messages_from_model_message)
+        .collect()
+}
+
+fn openai_message_text_content(message: &Value) -> Option<String> {
+    match message.get("content")? {
+        Value::String(value) => Some(value.clone()),
+        Value::Array(parts) => {
+            let texts = parts
+                .iter()
+                .filter_map(|part| {
+                    if part.get("type").and_then(|value| value.as_str()) == Some("text") {
+                        part.get("text").and_then(|value| value.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            if texts.is_empty() {
+                None
+            } else {
+                Some(texts.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn model_message_from_openai_message(message: &Value) -> Option<ModelMessage> {
+    let role = match message
+        .get("role")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+    {
+        "assistant" => ModelRole::Assistant,
+        "tool" => ModelRole::Tool,
+        "user" => ModelRole::User,
+        _ => return None,
+    };
+    let mut parts = Vec::new();
+    if role == ModelRole::Tool {
+        parts.push(MessagePart::ToolResult {
+            tool_call_id: message
+                .get("tool_call_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            content: message
+                .get("content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            is_error: false,
+            artifacts: Vec::new(),
+        });
+        return Some(ModelMessage {
+            role,
+            content: parts,
+        });
+    }
+    if let Some(content) = message.get("content") {
+        match content {
+            Value::String(text) if !text.is_empty() => {
+                parts.push(MessagePart::Text { text: text.clone() });
+            }
+            Value::Array(items) => {
+                for item in items {
+                    match item
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                    {
+                        "text" => {
+                            if let Some(text) = item.get("text").and_then(|value| value.as_str()) {
+                                parts.push(MessagePart::Text {
+                                    text: text.to_string(),
+                                });
+                            }
+                        }
+                        "image_url" => {
+                            let url = item
+                                .get("image_url")
+                                .and_then(|value| value.get("url"))
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            if let Some((mime_type, data)) = parse_data_image_url(url) {
+                                parts.push(MessagePart::Image { mime_type, data });
+                            } else if !url.is_empty() {
+                                parts.push(MessagePart::ImageUrl {
+                                    url: url.to_string(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(reasoning) = message
+        .get("reasoning_content")
+        .or_else(|| message.get("reasoning"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(MessagePart::Reasoning {
+            text: reasoning.to_string(),
+        });
+    }
+    for call in pending_tool_calls_from_openai_message(message) {
+        parts.push(MessagePart::ToolCall {
+            id: call.id,
+            name: call.function_name,
+            arguments: call.arguments,
+            arguments_raw: call.arguments_raw,
+            signature: call.signature,
+        });
+    }
+    Some(ModelMessage {
+        role,
+        content: parts,
+    })
+}
+
+pub fn pending_tool_calls_from_openai_message(message: &Value) -> Vec<PendingToolCall> {
+    message
+        .get("tool_calls")
+        .and_then(|value| value.as_array())
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let function = call.get("function")?;
+                    let name = function.get("name")?.as_str()?.to_string();
+                    let arguments_raw = tool_arguments_to_raw(function.get("arguments"));
+                    let (arguments, arguments_parse_error) = parse_tool_arguments(&arguments_raw);
+                    Some(PendingToolCall {
+                        id: call
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("tool_{}", uuid::Uuid::new_v4())),
+                        function_name: name,
+                        arguments,
+                        arguments_raw,
+                        arguments_parse_error,
+                        // Gemini thoughtSignature（自定义键）随回放带回。
+                        signature: call
+                            .get("thought_signature")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn openai_messages_from_model_message(message: &ModelMessage) -> Vec<Value> {
+    if message.role == ModelRole::Tool {
+        return message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolResult {
+                    tool_call_id,
+                    content,
+                    ..
+                } => Some(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                })),
+                _ => None,
+            })
+            .collect();
+    }
+    let mut text_parts = Vec::new();
+    let mut multimodal_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut reasoning: Option<String> = None;
+    for part in &message.content {
+        match part {
+            MessagePart::Text { text } => {
+                text_parts.push(text.clone());
+                multimodal_parts.push(serde_json::json!({ "type": "text", "text": text }));
+            }
+            MessagePart::Image { mime_type, data } => {
+                multimodal_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{mime_type};base64,{data}") },
+                }));
+            }
+            MessagePart::ImageUrl { url } => {
+                multimodal_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": url },
+                }));
+            }
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments_raw,
+                signature,
+                ..
+            } => {
+                let mut call = serde_json::json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments_raw,
+                    }
+                });
+                // Gemini thoughtSignature 挂在自定义键上带过存储/回放（其他 provider 忽略）。
+                if let Some(signature) = signature {
+                    call["thought_signature"] = Value::String(signature.clone());
+                }
+                tool_calls.push(call);
+            }
+            MessagePart::Reasoning { text } => {
+                reasoning = Some(text.clone());
+            }
+            MessagePart::ToolResult { .. } => {}
+        }
+    }
+    let content = if multimodal_parts
+        .iter()
+        .any(|part| part.get("type").and_then(|value| value.as_str()) == Some("image_url"))
+    {
+        Value::Array(multimodal_parts)
+    } else if text_parts.is_empty() && !tool_calls.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text_parts.join("\n"))
+    };
+    let mut out = serde_json::json!({
+        "role": message.role.as_str(),
+        "content": content,
+    });
+    if !tool_calls.is_empty() {
+        out["tool_calls"] = Value::Array(tool_calls);
+    }
+    if let Some(reasoning) = reasoning {
+        out["reasoning_content"] = Value::String(reasoning);
+    }
+    vec![out]
+}
+
+fn parse_data_image_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (mime, data) = rest.split_once(";base64,")?;
+    Some((mime.to_string(), data.to_string()))
+}
+
+/// Build the OpenAI **Responses** API `input` array from canonical `ModelMessage`s.
+///
+/// The Responses API models conversation state as a flat list of *items* rather than
+/// chat messages: tool calls become `{"type":"function_call",...}` items and tool
+/// results become `{"type":"function_call_output",...}` items (NOT `role:"tool"`
+/// messages). User/assistant text use `input_text` / `output_text` content parts, and
+/// user images use `input_image`. Mirrors `openai_messages_from_model_message` but for
+/// the Responses item shapes. (System text is carried separately as `instructions`.)
+pub fn responses_input_from_model_messages(messages: &[ModelMessage]) -> Vec<Value> {
+    let mut items = Vec::new();
+    for message in messages {
+        responses_items_from_model_message(message, &mut items);
+    }
+    items
+}
+
+fn responses_items_from_model_message(message: &ModelMessage, items: &mut Vec<Value>) {
+    if message.role == ModelRole::Tool {
+        for part in &message.content {
+            if let MessagePart::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } = part
+            {
+                items.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
+                    "output": content,
+                }));
+            }
+        }
+        return;
+    }
+
+    let is_assistant = message.role == ModelRole::Assistant;
+    let text_part_type = if is_assistant {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    let mut content_parts: Vec<Value> = Vec::new();
+    // Tool calls are sibling items, emitted AFTER the assistant's text content so the
+    // ordering matches a natural turn (message, then the calls it made).
+    let mut tool_call_items: Vec<Value> = Vec::new();
+
+    for part in &message.content {
+        match part {
+            MessagePart::Text { text } => {
+                content_parts.push(serde_json::json!({ "type": text_part_type, "text": text }));
+            }
+            MessagePart::Image { mime_type, data } => {
+                content_parts.push(serde_json::json!({
+                    "type": "input_image",
+                    "image_url": format!("data:{mime_type};base64,{data}"),
+                }));
+            }
+            MessagePart::ImageUrl { url } => {
+                content_parts.push(serde_json::json!({
+                    "type": "input_image",
+                    "image_url": url,
+                }));
+            }
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments_raw,
+                ..
+            } => {
+                tool_call_items.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": arguments_raw,
+                }));
+            }
+            // Reasoning is omitted on replay; ToolResult only appears on Tool messages.
+            MessagePart::Reasoning { .. } | MessagePart::ToolResult { .. } => {}
+        }
+    }
+
+    if !content_parts.is_empty() {
+        items.push(serde_json::json!({
+            "role": message.role.as_str(),
+            "content": content_parts,
+        }));
+    }
+    items.extend(tool_call_items);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_error_kind_marks_stream_read_interrupts_without_message_matching() {
+        let stream_error = ModelError::with_kind(
+            "temporary stream failure",
+            ModelErrorKind::StreamReadInterrupted,
+        );
+        let generic_error = ModelError::new("temporary stream failure");
+
+        assert!(stream_error.is_stream_read_interrupted());
+        assert!(!generic_error.is_stream_read_interrupted());
+    }
+
+    #[test]
+    fn pending_tool_calls_accept_string_and_object_arguments() {
+        // 字符串形态（OpenAI 规范）。
+        let string_msg = serde_json::json!({
+            "tool_calls": [{
+                "id": "call_1",
+                "function": { "name": "web_search", "arguments": "{\"query\":\"a\"}" }
+            }]
+        });
+        let calls = pending_tool_calls_from_openai_message(&string_msg);
+        assert_eq!(calls[0].arguments["query"], "a");
+        assert!(calls[0].arguments_parse_error.is_none());
+
+        // 对象形态（部分 OpenAI 兼容网关 / codex 代理）。回归：旧逻辑会丢成 `{}`。
+        let object_msg = serde_json::json!({
+            "tool_calls": [{
+                "id": "call_2",
+                "function": { "name": "web_search", "arguments": { "query": "b" } }
+            }]
+        });
+        let calls = pending_tool_calls_from_openai_message(&object_msg);
+        assert_eq!(calls[0].arguments["query"], "b");
+        assert!(calls[0].arguments_parse_error.is_none());
+
+        // 缺失 / null → 回退空对象，不报错。
+        let null_msg = serde_json::json!({
+            "tool_calls": [{
+                "id": "call_3",
+                "function": { "name": "web_search", "arguments": null }
+            }]
+        });
+        let calls = pending_tool_calls_from_openai_message(&null_msg);
+        assert_eq!(calls[0].arguments_raw, "{}");
+        assert!(calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn responses_input_maps_tool_call_and_result_to_items() {
+        let messages = vec![
+            ModelMessage::text(ModelRole::User, "明天吉林市天气？"),
+            ModelMessage {
+                role: ModelRole::Assistant,
+                content: vec![MessagePart::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: serde_json::json!({ "query": "吉林市 明天 天气" }),
+                    arguments_raw: "{\"query\":\"吉林市 明天 天气\"}".to_string(),
+                    signature: None,
+                }],
+            },
+            ModelMessage {
+                role: ModelRole::Tool,
+                content: vec![MessagePart::ToolResult {
+                    tool_call_id: "call_1".to_string(),
+                    content: "多云转晴 16-24℃".to_string(),
+                    is_error: false,
+                    artifacts: Vec::new(),
+                }],
+            },
+        ];
+        let items = responses_input_from_model_messages(&messages);
+
+        // user message → role item with input_text
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["content"][0]["type"], "input_text");
+        assert_eq!(items[0]["content"][0]["text"], "明天吉林市天气？");
+        // assistant tool call → function_call item (no empty assistant message emitted)
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[1]["call_id"], "call_1");
+        assert_eq!(items[1]["name"], "web_search");
+        assert_eq!(items[1]["arguments"], "{\"query\":\"吉林市 明天 天气\"}");
+        // tool result → function_call_output item
+        assert_eq!(items[2]["type"], "function_call_output");
+        assert_eq!(items[2]["call_id"], "call_1");
+        assert_eq!(items[2]["output"], "多云转晴 16-24℃");
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn responses_input_maps_user_image_to_input_image() {
+        let messages = vec![ModelMessage {
+            role: ModelRole::User,
+            content: vec![
+                MessagePart::ImageUrl {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                },
+                MessagePart::Text {
+                    text: "what is this?".to_string(),
+                },
+            ],
+        }];
+        let items = responses_input_from_model_messages(&messages);
+        assert_eq!(items.len(), 1);
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "input_image");
+        assert_eq!(content[0]["image_url"], "data:image/png;base64,AAAA");
+        assert_eq!(content[1]["type"], "input_text");
+    }
+}

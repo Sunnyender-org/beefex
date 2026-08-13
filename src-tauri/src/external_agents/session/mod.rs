@@ -1,0 +1,245 @@
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+
+use tauri::AppHandle;
+use uuid::Uuid;
+
+use tauri::Manager;
+
+use crate::external_agents::types::ExternalAgentSession;
+
+pub mod acp;
+pub mod claude_init;
+pub mod codex_app_server;
+pub mod live;
+pub mod pi_rpc;
+
+fn sessions_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir unavailable: {e}"))?;
+    let dir = base.join("external-agent-sessions");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("create sessions dir: {e}"))?;
+    }
+    Ok(dir)
+}
+
+fn session_path(app: &AppHandle, conversation_id: &str) -> Result<PathBuf, String> {
+    Ok(sessions_dir(app)?.join(format!("{conversation_id}.json")))
+}
+
+pub fn load_session(app: &AppHandle, conversation_id: &str) -> Option<ExternalAgentSession> {
+    let path = session_path(app, conversation_id).ok()?;
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn save_session(app: &AppHandle, session: &ExternalAgentSession) -> Result<(), String> {
+    let path = session_path(app, &session.conversation_id)?;
+    let raw = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
+    fs::write(path, raw).map_err(|e| e.to_string())
+}
+
+pub fn stable_prompt_hash(instructions: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    instructions.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+pub struct AgentResumeContext {
+    pub resume_session_id: Option<String>,
+    pub new_session_id: Option<String>,
+    pub is_resuming: bool,
+    pub stored_stable_prompt_hash: Option<String>,
+    pub skip_instructions: bool,
+    /// Effective model at delivery time, normalized (empty / "default" → `None`). Persisted
+    /// alongside the session so a later turn that picks a different model can detect it and
+    /// start a fresh session instead of resuming (some CLIs bake model into the resumed session).
+    pub delivered_model: Option<String>,
+}
+
+/// Normalize a model selection to what actually gets passed to the CLI: blank or the sentinel
+/// `"default"` mean "no explicit `--model`", i.e. `None`.
+fn normalize_model(model: Option<&str>) -> Option<String> {
+    model
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "default")
+        .map(str::to_string)
+}
+
+pub fn resolve_agent_resume_context(
+    app: &AppHandle,
+    conversation_id: &str,
+    agent_id: &str,
+    resumes_via_cli: bool,
+    instructions: &str,
+    current_model: Option<&str>,
+    is_slash: bool,
+) -> AgentResumeContext {
+    let delivered_model = normalize_model(current_model);
+    if !resumes_via_cli {
+        return AgentResumeContext {
+            resume_session_id: None,
+            new_session_id: None,
+            is_resuming: false,
+            stored_stable_prompt_hash: None,
+            skip_instructions: false,
+            delivered_model,
+        };
+    }
+
+    let hash = stable_prompt_hash(instructions);
+    if let Some(stored) = load_session(app, conversation_id).filter(|s| s.agent_id == agent_id) {
+        // Model mismatch → the CLI's stored session is pinned to the old model; force a fresh
+        // one so the newly-selected model actually takes effect. Exception: a slash command
+        // (`/compact`, `/clear`, …) is meta-work on the CURRENT session — starting a new one
+        // would send the slash into an empty context and produce nothing useful. Keep resuming
+        // and let the next non-slash turn pick up the model switch instead. In that case the
+        // effective delivered model is still the stored one (the CLI ignores `--model` on
+        // `--resume`), so surface it as such and let `persist_delivered_session` skip writing.
+        let effective_delivered = if is_slash {
+            stored.model.clone()
+        } else if stored.model != delivered_model {
+            return AgentResumeContext {
+                resume_session_id: None,
+                new_session_id: Some(Uuid::new_v4().to_string()),
+                is_resuming: false,
+                stored_stable_prompt_hash: None,
+                skip_instructions: false,
+                delivered_model,
+            };
+        } else {
+            delivered_model
+        };
+        let skip = stored
+            .stable_prompt_hash
+            .as_ref()
+            .is_some_and(|h| h == &hash);
+        return AgentResumeContext {
+            resume_session_id: Some(stored.session_id.clone()),
+            new_session_id: None,
+            is_resuming: true,
+            stored_stable_prompt_hash: stored.stable_prompt_hash.clone(),
+            skip_instructions: skip,
+            delivered_model: effective_delivered,
+        };
+    }
+
+    AgentResumeContext {
+        resume_session_id: None,
+        new_session_id: Some(Uuid::new_v4().to_string()),
+        is_resuming: false,
+        stored_stable_prompt_hash: None,
+        skip_instructions: false,
+        delivered_model,
+    }
+}
+
+pub fn persist_delivered_session(
+    app: &AppHandle,
+    conversation_id: &str,
+    agent_id: &str,
+    resume_ctx: &AgentResumeContext,
+    instructions: &str,
+    is_slash: bool,
+) -> Result<(), String> {
+    // Slash turns pass the raw slash text as `instructions` (no daemon prompt, no memory), so
+    // rewriting the stored hash from them would poison the next non-slash turn's diff check.
+    // Same reasoning for `delivered_model`: on a resume-under-slash we intentionally kept it as
+    // the stored model, so there's nothing to write.
+    if is_slash {
+        return Ok(());
+    }
+    if !resume_ctx.is_resuming {
+        if let Some(session_id) = resume_ctx.new_session_id.as_ref() {
+            save_session(
+                app,
+                &ExternalAgentSession {
+                    conversation_id: conversation_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.clone(),
+                    stable_prompt_hash: Some(stable_prompt_hash(instructions)),
+                    model: resume_ctx.delivered_model.clone(),
+                },
+            )?;
+        }
+    } else if resume_ctx.stored_stable_prompt_hash.as_deref()
+        != Some(stable_prompt_hash(instructions).as_str())
+    {
+        if let Some(mut stored) = load_session(app, conversation_id) {
+            stored.stable_prompt_hash = Some(stable_prompt_hash(instructions));
+            stored.model = resume_ctx.delivered_model.clone();
+            save_session(app, &stored)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_model, stable_prompt_hash};
+
+    #[test]
+    fn stable_prompt_hash_is_deterministic() {
+        assert_eq!(stable_prompt_hash("a"), stable_prompt_hash("a"));
+        assert_ne!(stable_prompt_hash("a"), stable_prompt_hash("b"));
+    }
+
+    #[test]
+    fn normalize_model_treats_blank_and_default_as_none() {
+        assert_eq!(normalize_model(None), None);
+        assert_eq!(normalize_model(Some("")), None);
+        assert_eq!(normalize_model(Some("   ")), None);
+        assert_eq!(normalize_model(Some("default")), None);
+        assert_eq!(normalize_model(Some("  opus  ")), Some("opus".to_string()));
+        assert_eq!(
+            normalize_model(Some("provider/model-x")),
+            Some("provider/model-x".to_string())
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 2: persisted handle for a live rich-protocol session, so a conversation can RESUME its
+// native thread/session after an app restart. Stored separately from ExternalAgentSession (which
+// drives claude's CLI `--resume`) to avoid clobbering it.
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LiveSessionHandle {
+    pub agent_id: String,
+    /// `"codex_app_server"` | `"acp_json_rpc"`.
+    pub protocol: String,
+    /// Native thread id (codex) / session id (ACP).
+    pub native_id: String,
+    pub cwd: String,
+}
+
+fn live_handle_path(app: &AppHandle, conversation_id: &str) -> Result<PathBuf, String> {
+    Ok(sessions_dir(app)?.join(format!("live-{conversation_id}.json")))
+}
+
+pub fn load_live_handle(app: &AppHandle, conversation_id: &str) -> Option<LiveSessionHandle> {
+    let raw = fs::read_to_string(live_handle_path(app, conversation_id).ok()?).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn save_live_handle(
+    app: &AppHandle,
+    conversation_id: &str,
+    handle: &LiveSessionHandle,
+) -> Result<(), String> {
+    let path = live_handle_path(app, conversation_id)?;
+    let raw = serde_json::to_string_pretty(handle).map_err(|e| e.to_string())?;
+    fs::write(path, raw).map_err(|e| e.to_string())
+}
+
+pub fn clear_live_handle(app: &AppHandle, conversation_id: &str) {
+    if let Ok(path) = live_handle_path(app, conversation_id) {
+        let _ = fs::remove_file(path);
+    }
+}

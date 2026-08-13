@@ -1,0 +1,16 @@
+//! Provider-agnostic Chat model contracts and provider adapters.
+//!
+//! Runtime code should exchange `GenerateRequest`, `GenerateOutput`, and `StreamPart`.
+//! Provider-specific JSON belongs inside this module's adapters.
+
+pub mod anthropic;
+pub mod gemini;
+pub mod openai;
+pub mod responses;
+pub mod types;
+
+pub use anthropic::AnthropicMessagesProvider;
+pub use gemini::GeminiProvider;
+pub use openai::OpenAiChatProvider;
+pub use responses::OpenAiResponsesProvider;
+pub use types::*;

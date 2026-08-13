@@ -1,0 +1,3708 @@
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { GitBranch } from 'lucide-react'
+import { Sidebar, type ExtensionsNavItem } from './Sidebar'
+import { ChatImageViewer } from './ChatImageViewer'
+import { ChatTitlebarActions } from './ChatTitlebarActions'
+import { PiProjectTrustDialog } from './PiProjectTrustDialog'
+import { ScopedApprovalDialog } from './ScopedApprovalDialog'
+import { PiTaskMenu } from './PiTaskMenu'
+import { ManagedModelSelector } from './ManagedModelSelector'
+import { resolveManagedModelValue } from './managedModelPolicy'
+import type { PiRpcCommand } from './piCapabilities'
+import type { AssistantStreamStats } from './MessageList'
+import { InputBar } from './InputBar'
+import { BackgroundJobsIndicator } from './BackgroundJobsIndicator'
+import { WindowControls } from './WindowControls'
+import { ContextIndicator } from './ContextIndicator'
+import { AgentTodoIndicator } from './AgentTodoIndicator'
+import { TaskStatusBadge } from './TaskStatusBadge'
+import { CompletionReceipt } from './CompletionReceipt'
+import { isExecutableAgentPlanText } from './agentPlan'
+import { chatApi } from './api'
+import {
+  chatTitlebarMacInsetClass,
+  chatTitlebarRowClass,
+  usesNativeTitlebar,
+} from './platform'
+import type {
+  ChatProject,
+  ChatSet,
+  ChatMessage,
+  ChatAssistant,
+  Conversation,
+  ConversationListItem,
+  ConversationContextState,
+  AgentPlanMode,
+  AgentPlanState,
+  AgentTodoState,
+  ChatMessageSegment,
+  PendingAttachment,
+  PiProjectTrustPreview,
+  SkillMeta,
+  ToolCallRecord,
+  ModelRef,
+  ChatTaskStatus,
+} from './types'
+import {
+  api,
+  type ChatExternalSendRequest,
+  type ChatPiRuntimeStatusPayload,
+  type ChatSessionConsentPayload,
+  type ChatStreamPayload,
+  type ChatToolConfirmPayload,
+  type ChatToolDefinition,
+  type ChatMcpServer,
+  type ChatToolProgressPayload,
+  type ChatUserPromptPayload,
+} from '../api/tauri'
+import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
+import { OnboardingShell } from '../onboarding/OnboardingShell'
+import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
+import type { Lang } from '../settings/i18n'
+import { estimateTokens } from '../utils/tokens'
+import {
+  CHAT_MIN_SIZE_COLLAPSED,
+  CHAT_MIN_SIZE_EXPANDED,
+  forgetRememberedChatRoute,
+  getRememberedChatSidebarCollapsed,
+  isChatOnboardingPath,
+  rememberChatSidebarCollapsed,
+  rememberChatSize,
+} from './persistence'
+import { normalizeToolCallStatus } from './toolStatus'
+import { isTauriRuntime } from './utils'
+import { hasEnabledNativeBuiltinTool, hasEnabledSkillRuntime } from '../utils/chatTools'
+import { onChatImageViewerOpen, type ChatImageViewerItem } from './imageViewer'
+import {
+  collectGeneratingConversationIds,
+  createEmptyStreamSnapshot,
+  isConversationBusy,
+  isConversationInFlight,
+  type ConversationStreamSnapshot,
+} from './conversationRuns'
+import {
+  getCoarse as getStreamCoarse,
+  patchSnapshot as patchStreamSnapshot,
+  reset as resetStreamStore,
+  setCoarse as setStreamCoarse,
+  setSnapshot as setStreamSnapshot,
+  useStreamCoarse,
+} from './streamingStore'
+import {
+  beginGroup,
+  endGroup,
+  ensureGroupColumn,
+  flushGroups,
+  hasActiveGroup,
+  resetGroups,
+  touchGroup,
+} from './groupStreamingStore'
+import { compareTimelineSegments, segmentStepNumber, segmentToolCallId } from './segments'
+import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
+import { isCurrentConversationAwaitingApproval, resolveTaskStatus } from './taskStatus'
+import { useBeefApiAccount } from '../beefapi/useBeefApiAccount'
+import { canUseManagedBeefApiAccount } from '../beefapi/accountPresentation'
+
+const AssistantCenter = lazy(() => import('./AssistantCenter').then((module) => ({
+  default: module.AssistantCenter,
+})))
+
+// 共享 import thunk：lazy 与空闲预取复用同一次动态 import（模块缓存保证只加载一次）。
+// SettingsShell 依赖图很大（Markdown/KaTeX、各设置面板），dev 下首次点开设置要现场编译
+// 数百个模块而转圈数秒；挂载后空闲预取把这段成本移到用户点击之前。
+const importSettingsShell = () => import('../settings/SettingsShell')
+
+const SettingsShell = lazy(() => importSettingsShell().then((module) => ({
+  default: module.SettingsShell,
+})))
+
+const SkillCenter = lazy(() => import('./SkillCenter').then((module) => ({
+  default: module.SkillCenter,
+})))
+
+const MessageList = lazy(() => import('./MessageList').then((module) => ({
+  default: module.MessageList,
+})))
+
+function ChatPaneLoading() {
+  return (
+    <div className="chat-themed-surface flex h-full w-full items-center justify-center">
+      <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-800 dark:border-neutral-700 dark:border-t-neutral-200" />
+    </div>
+  )
+}
+
+function MessageListLoading() {
+  return (
+    <div className="chat-themed-surface flex flex-1 items-center justify-center">
+      <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-800 dark:border-neutral-700 dark:border-t-neutral-200" />
+    </div>
+  )
+}
+
+type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'onboarding'
+
+interface ChatProps {
+  onSettingsChange: () => void
+  /**
+   * 首屏内容就绪回调（一次性）。宿主（App）据此把窗口 show 从“App 挂载即弹出”推迟到
+   * “Chat 首屏可渲染”，避免窗口弹出后仍在转圈。初始视图为设置页时，就绪信号来自
+   * SettingsShell 的 onReady；其余视图挂载后即视为骨架就绪。
+   */
+  onContentReady?: () => void
+}
+
+function hashPath(): string {
+  return window.location.hash.replace('#', '').split('?')[0]
+}
+
+function isChatSettingsPath(path: string): boolean {
+  return path === 'chat/settings' || path.startsWith('chat/settings/')
+}
+
+function isChatAssistantCenterPath(path: string): boolean {
+  return path === 'chat/assistants' || path.startsWith('chat/assistants/')
+}
+
+function isChatOnboardingRoute(path: string): boolean {
+  return isChatOnboardingPath(path)
+}
+
+function isChatSkillCenterPath(path: string): boolean {
+  return path === 'chat/skill' || path.startsWith('chat/skill/')
+}
+
+function scheduleIdleTask(callback: () => void, timeout = 1200): () => void {
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (cb: () => void, options?: { timeout?: number }) => number
+    cancelIdleCallback?: (handle: number) => void
+  }
+  if (idleWindow.requestIdleCallback && idleWindow.cancelIdleCallback) {
+    const handle = idleWindow.requestIdleCallback(callback, { timeout })
+    return () => idleWindow.cancelIdleCallback?.(handle)
+  }
+
+  const handle = window.setTimeout(callback, timeout)
+  return () => window.clearTimeout(handle)
+}
+
+function toolEventToRecord(payload: ChatToolProgressPayload): ToolCallRecord {
+  return {
+    id: payload.id || payload.toolCallId,
+    toolCallId: payload.toolCallId,
+    conversationId: payload.conversationId,
+    runId: payload.runId,
+    messageId: payload.messageId,
+    name: payload.name,
+    source: payload.source,
+    serverId: payload.serverId ?? undefined,
+    status: normalizeToolCallStatus(payload.status),
+    arguments: payload.argumentsPreview,
+    argumentPreview: payload.argumentsPreview,
+    argumentsPreview: payload.argumentsPreview,
+    resultPreview: payload.resultPreview ?? undefined,
+    error: payload.error ?? undefined,
+    startedAt: payload.startedAt ?? undefined,
+    completedAt: payload.completedAt ?? undefined,
+    durationMs: payload.durationMs ?? undefined,
+    round: payload.round,
+    sensitive: payload.sensitive,
+    artifacts: payload.artifacts ?? [],
+    traceId: payload.traceId ?? undefined,
+    spanId: payload.spanId ?? undefined,
+    structuredContent: payload.structuredContent,
+  }
+}
+
+function userPromptEventToRecord(payload: ChatUserPromptPayload): ToolCallRecord {
+  return {
+    id: payload.id || payload.toolCallId,
+    toolCallId: payload.toolCallId,
+    conversationId: payload.conversationId,
+    runId: payload.runId,
+    messageId: payload.messageId,
+    name: payload.name || 'ask_user',
+    source: payload.source || 'native',
+    status: 'running',
+    arguments: payload.prompt,
+    args: payload.prompt,
+    input: payload.prompt,
+    sensitive: false,
+    artifacts: [],
+    structuredContent: payload.structuredContent ?? {
+      askUser: {
+        phase: 'awaiting',
+        title: payload.prompt.title,
+        questions: payload.prompt.questions,
+        answers: {},
+      },
+    },
+  }
+}
+
+function streamPayloadToSegment(payload: ChatStreamPayload): ChatMessageSegment | null {
+  const raw = payload.segment ?? null
+  const id = payload.segmentId ?? raw?.id
+  const kind = payload.segmentKind ?? raw?.kind
+  const phase = payload.phase ?? raw?.phase
+  const order = payload.order ?? raw?.order
+  if (!id || !kind || !phase || order == null) return null
+
+  const stepNumber = raw?.step_number ?? raw?.stepNumber ?? payload.stepNumber ?? null
+  const toolCallId = raw?.tool_call_id ?? raw?.toolCallId ?? payload.toolCallId ?? null
+  return {
+    id,
+    kind,
+    phase,
+    order,
+    step_number: stepNumber,
+    stepNumber,
+    round: raw?.round ?? payload.round ?? null,
+    text: raw?.text ?? null,
+    tool_call_id: toolCallId,
+    toolCallId,
+  }
+}
+
+function upsertStreamSegment(
+  segments: ChatMessageSegment[],
+  incoming: ChatMessageSegment,
+  delta = '',
+): ChatMessageSegment[] {
+  const incomingToolCallId = segmentToolCallId(incoming)
+  const index = segments.findIndex((segment) => (
+    segment.id === incoming.id ||
+    (incoming.kind === 'tool' &&
+      segment.kind === 'tool' &&
+      incomingToolCallId &&
+      segmentToolCallId(segment) === incomingToolCallId)
+  ))
+  const existing = index >= 0 ? segments[index] : null
+  const nextText = incoming.kind === 'tool'
+    ? incoming.text ?? existing?.text ?? null
+    : (() => {
+        const base = existing?.text ?? incoming.text ?? ''
+        const append = !existing && incoming.text && incoming.text === delta ? '' : delta
+        return `${base}${append}`
+      })()
+  const existingStepNumber = existing ? segmentStepNumber(existing) : null
+  const incomingStepNumber = segmentStepNumber(incoming)
+  const nextSegment: ChatMessageSegment = {
+    ...existing,
+    ...incoming,
+    step_number: incomingStepNumber ?? existingStepNumber ?? null,
+    stepNumber: incomingStepNumber ?? existingStepNumber ?? null,
+    tool_call_id: incoming.tool_call_id ?? incoming.toolCallId ?? existing?.tool_call_id ?? existing?.toolCallId ?? null,
+    toolCallId: incoming.toolCallId ?? incoming.tool_call_id ?? existing?.toolCallId ?? existing?.tool_call_id ?? null,
+    text: nextText,
+  }
+  const next = index < 0
+    ? [...segments, nextSegment]
+    : segments.map((segment, i) => (i === index ? nextSegment : segment))
+  return next.sort(compareTimelineSegments)
+}
+
+function nextSegmentOrder(segments: ChatMessageSegment[]): number {
+  if (segments.length === 0) return 1
+  return Math.max(...segments.map((segment) => segment.order ?? 0)) + 1
+}
+
+function upsertToolStreamSegment(
+  segments: ChatMessageSegment[],
+  record: ToolCallRecord,
+): ChatMessageSegment[] {
+  const toolCallId = record.id || record.toolCallId || ''
+  if (!toolCallId) return segments
+  const exists = segments.some(
+    (segment) => segment.kind === 'tool' && segmentToolCallId(segment) === toolCallId,
+  )
+  if (exists) return segments
+  return upsertStreamSegment(segments, {
+    id: `seg_tool_${toolCallId}`,
+    kind: 'tool',
+    phase: 'tool_loop',
+    order: nextSegmentOrder(segments),
+    round: record.round ?? 1,
+    tool_call_id: toolCallId,
+    toolCallId,
+  })
+}
+
+function sameSegmentField<T>(left: T | null | undefined, right: T | null | undefined): boolean {
+  return (left ?? null) === (right ?? null)
+}
+
+// 设置当前视图的流式错误（写 streamingStore 的 coarse 片）。模块级函数，调用点无需进
+// useCallback 依赖。注意：与 setStreamErrorForConversation 不同，这里只改当前视图、不写
+// streamErrorsRef（保持原 setStreamError(useState) 的语义）。
+function setStreamError(error: string): void {
+  setStreamCoarse({ streamError: error })
+}
+
+function findReasoningSegmentForText(
+  segments: ChatMessageSegment[],
+  textSegment: ChatMessageSegment,
+): ChatMessageSegment | null {
+  const reversedReasoning = [...segments]
+    .reverse()
+    .filter((item) => item.kind === 'reasoning')
+  const textStepNumber = segmentStepNumber(textSegment)
+  const textRound = textSegment.round ?? null
+
+  return reversedReasoning.find((item) => (
+    segmentStepNumber(item) === textStepNumber &&
+    sameSegmentField(item.round, textRound) &&
+    item.phase === textSegment.phase
+  ))
+    ?? reversedReasoning.find((item) => (
+      segmentStepNumber(item) === textStepNumber &&
+      sameSegmentField(item.round, textRound)
+    ))
+    ?? reversedReasoning.find((item) => segmentStepNumber(item) === textStepNumber)
+    ?? reversedReasoning[0]
+    ?? null
+}
+
+function updateReasoningSegmentDuration(
+  snapshot: ConversationStreamSnapshot,
+  segmentId: string,
+  now = Date.now(),
+) {
+  const startedAt = snapshot.reasoningStartedAtBySegmentId[segmentId]
+  if (startedAt == null) return
+  snapshot.reasoningDurationMsBySegmentId = {
+    ...snapshot.reasoningDurationMsBySegmentId,
+    [segmentId]: Math.max(
+      snapshot.reasoningDurationMsBySegmentId[segmentId] ?? 0,
+      now - startedAt,
+    ),
+  }
+}
+
+// 把一条 chat-stream delta 累积进给定快照（会话单流 or 多答组某列共用）。
+// 原地 mutate snapshot；segment 已由调用方算好。返回 void。
+function applyStreamDeltaToSnapshot(
+  snapshot: ConversationStreamSnapshot,
+  payload: ChatStreamPayload,
+  segment: ChatMessageSegment | null,
+) {
+  if (segment) {
+    snapshot.segments = upsertStreamSegment(
+      snapshot.segments,
+      segment,
+      segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
+    )
+  }
+  if (payload.reasoningDelta) {
+    const now = Date.now()
+    if (snapshot.reasoningStartedAt == null) {
+      snapshot.reasoningStartedAt = now
+    }
+    if (segment?.kind === 'reasoning') {
+      const segmentStartedAt = snapshot.reasoningStartedAtBySegmentId[segment.id] ?? now
+      snapshot.reasoningStartedAtBySegmentId[segment.id] = segmentStartedAt
+      updateReasoningSegmentDuration(snapshot, segment.id, now)
+    }
+    snapshot.streaming = true
+    snapshot.reasoningStreaming = true
+    snapshot.reasoning += payload.reasoningDelta
+    snapshot.reasoningDurationMs = Math.max(
+      snapshot.reasoningDurationMs ?? 0,
+      now - snapshot.reasoningStartedAt,
+    )
+  }
+  if (payload.delta) {
+    if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
+      snapshot.reasoningDurationMs = Math.max(
+        snapshot.reasoningDurationMs ?? 0,
+        Date.now() - snapshot.reasoningStartedAt,
+      )
+    }
+    if (segment?.kind === 'text') {
+      const activeReasoningSegment = findReasoningSegmentForText(snapshot.segments, segment)
+      if (activeReasoningSegment) {
+        updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
+      }
+    }
+    snapshot.streaming = true
+    snapshot.reasoningStreaming = false
+    snapshot.content += payload.delta
+  }
+}
+
+// done 帧收尾：补齐最后一段 reasoning 的时长。原地 mutate。
+function finalizeReasoningDurationOnDone(snapshot: ConversationStreamSnapshot) {
+  if (snapshot.reasoningStartedAt != null && snapshot.reasoningStreaming) {
+    snapshot.reasoningDurationMs = Math.max(
+      snapshot.reasoningDurationMs ?? 0,
+      Date.now() - snapshot.reasoningStartedAt,
+    )
+    const activeReasoningSegment = [...snapshot.segments]
+      .reverse()
+      .find((item) => item.kind === 'reasoning')
+    if (activeReasoningSegment) {
+      updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
+    }
+  }
+}
+
+// 把一条 chat-tool record 累积进给定快照（会话单流 or 多答组某列共用）。原地 mutate。
+function applyToolRecordToSnapshot(
+  snapshot: ConversationStreamSnapshot,
+  record: ToolCallRecord,
+) {
+  snapshot.streaming = true
+  snapshot.reasoningStreaming = false
+  const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
+  snapshot.toolCalls = index < 0
+    ? [...snapshot.toolCalls, record]
+    : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+  snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
+}
+
+function normalizeSkill(skill: import('../api/tauri').SkillMeta): SkillMeta {
+  return {
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+    source: skill.source,
+    path: skill.path ?? undefined,
+    recommendedTools: skill.recommendedTools,
+    disableModelInvocation: skill.disableModelInvocation,
+    files: skill.files,
+  }
+}
+
+function skillRecommendedTools(skill?: SkillMeta | null): string[] {
+  return skill?.recommended_tools ?? skill?.recommendedTools ?? []
+}
+
+function toolMatchesRecommendation(tool: ChatToolDefinition, recommended: string): boolean {
+  const name = recommended.trim()
+  if (!name) return false
+  return (
+    tool.name === name ||
+    tool.id === name ||
+    `${tool.serverId ?? ''}:${tool.name}` === name
+  )
+}
+
+function attachmentExtension(name: string): string {
+  return name.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function documentSkillNameForAttachment(attachment: PendingAttachment): string | null {
+  if (attachment.type === 'image') return null
+  switch (attachmentExtension(attachment.name)) {
+    case 'pdf':
+      return 'pdf'
+    case 'doc':
+    case 'docx':
+      return 'docx'
+    case 'xls':
+    case 'xlsx':
+    case 'xlsm':
+    case 'csv':
+    case 'tsv':
+      return 'xlsx'
+    default:
+      return null
+  }
+}
+
+function findEnabledSkillId(skills: SkillMeta[], skillName: string): string | null {
+  const normalized = skillName.toLowerCase()
+  return skills.find((skill) => (
+    skill.id.toLowerCase() === normalized || skill.name.toLowerCase() === normalized
+  ))?.id ?? null
+}
+
+function inferSingleAttachmentSkillId(
+  attachments: PendingAttachment[],
+  skills: SkillMeta[],
+): string | null {
+  const skillNames = Array.from(new Set(
+    attachments
+      .map(documentSkillNameForAttachment)
+      .filter((name): name is string => Boolean(name)),
+  ))
+  if (skillNames.length !== 1) return null
+  return findEnabledSkillId(skills, skillNames[0])
+}
+
+function isLocallyCancelledPayload(
+  payload: { conversationId: string; runId?: string },
+  cancelledConversationId: string | null,
+  cancelledRunId: string | null,
+): boolean {
+  if (cancelledConversationId !== payload.conversationId) return false
+  return !cancelledRunId || !payload.runId || payload.runId === cancelledRunId
+}
+
+function isPlainBlankConversation(conversation: Conversation | null): boolean {
+  return Boolean(
+    conversation
+    && conversation.messages.length === 0
+    && !(conversation.assistant_id ?? conversation.assistantId),
+  )
+}
+
+function conversationUsesModel(
+  conversation: Conversation,
+  providerId: string,
+  model: string,
+): boolean {
+  return conversation.provider_id === providerId && conversation.model === model
+}
+
+function optimisticConversationTitle(content: string): string {
+  const compact = content.replace(/\s+/g, ' ').trim()
+  if (!compact) return '新对话'
+  return compact.length > 30 ? `${compact.slice(0, 30)}...` : compact
+}
+
+function optimisticConversationListItem(
+  conversation: Conversation,
+  content: string,
+): ConversationListItem {
+  const preview = content.replace(/\s+/g, ' ').trim()
+  const title = conversation.title === '新对话'
+    ? optimisticConversationTitle(content)
+    : conversation.title
+  return {
+    id: conversation.id,
+    title,
+    preview: preview.length > 100 ? `${preview.slice(0, 100)}...` : preview,
+    provider_id: conversation.provider_id,
+    model: conversation.model,
+    message_count: Math.max(1, conversation.messages.length),
+    created_at: conversation.created_at,
+    updated_at: Math.floor(Date.now() / 1000),
+    pinned: conversation.pinned,
+    folder: conversation.folder,
+    project_id: conversation.project_id ?? conversation.projectId ?? null,
+    projectId: conversation.project_id ?? conversation.projectId ?? null,
+    set_id: conversation.set_id ?? conversation.setId ?? null,
+    setId: conversation.set_id ?? conversation.setId ?? null,
+    assistant_id: conversation.assistant_id ?? conversation.assistantId ?? null,
+    assistantId: conversation.assistant_id ?? conversation.assistantId ?? null,
+    assistant_name:
+      conversation.assistant_snapshot?.name
+      ?? conversation.assistantSnapshot?.name
+      ?? null,
+    assistantName:
+      conversation.assistant_snapshot?.name
+      ?? conversation.assistantSnapshot?.name
+      ?? null,
+  }
+}
+
+type SendMessageOptions = {
+  forceNewConversation?: boolean
+  conversationOverride?: Conversation | null
+}
+
+export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
+  const beefApiAccount = useBeefApiAccount()
+  const [chatView, setChatView] = useState<ChatView>(() => {
+    const path = hashPath()
+    if (isChatOnboardingRoute(path)) return 'onboarding'
+    if (isChatSettingsPath(path)) return 'settings'
+    if (isChatAssistantCenterPath(path)) return 'assistants'
+    if (isChatSkillCenterPath(path)) return 'skill'
+    return 'conversation'
+  })
+  // 首屏就绪只发一次。初始视图是设置页则等 SettingsShell.onReady；否则挂载后即发。
+  const contentReadyEmittedRef = useRef(false)
+  const emitContentReady = useCallback(() => {
+    if (contentReadyEmittedRef.current) return
+    contentReadyEmittedRef.current = true
+    onContentReady?.()
+  }, [onContentReady])
+  const initialViewIsSettingsRef = useRef(chatView === 'settings')
+  useLayoutEffect(() => {
+    // 初始设置页把就绪信号委托给 SettingsShell.onReady（数据就绪才可渲染）；
+    // 其余初始视图（会话/助手/技能/引导）挂载即有骨架，直接发信号。
+    if (!initialViewIsSettingsRef.current) emitContentReady()
+  }, [emitContentReady])
+  const [currentConversation, setCurrentConversation] = useState<Awaited<
+    ReturnType<typeof chatApi.getConversation>
+  > | null>(null)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => getRememberedChatSidebarCollapsed())
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [selectedProject, setSelectedProject] = useState<ChatProject | null>(null)
+  const [pendingProjectTrust, setPendingProjectTrust] = useState<{
+    project: ChatProject
+    preview: PiProjectTrustPreview
+  } | null>(null)
+  const [savingProjectTrust, setSavingProjectTrust] = useState(false)
+  const [projectTrustError, setProjectTrustError] = useState('')
+  const [selectedSet, setSelectedSet] = useState<ChatSet | null>(null)
+  // 流式高频状态已移到 streamingStore（useSyncExternalStore）。Chat 只订阅 coarse 这一片
+  // （streaming/streamFrozen/cancelling/streamError，边沿才变），用于 showEmptyHero / drain 判定；
+  // 内容快照由 MessageList 直接订阅，避免每帧 token 拖着整个 Chat 重渲。
+  const streamCoarse = useStreamCoarse()
+  /** 发送中待显示的用户消息（与 conversation 分离，避免 route reload 冲掉） */
+  const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null)
+  const [pendingUserMessageConversationId, setPendingUserMessageConversationId] = useState<string | null>(null)
+  const [assistantStreamStatsByMessageId, setAssistantStreamStatsByMessageId] =
+    useState<Record<string, AssistantStreamStats>>({})
+  const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0)
+  const [optimisticSidebarConversations, setOptimisticSidebarConversations] =
+    useState<ConversationListItem[]>([])
+  const [generatingConversationIds, setGeneratingConversationIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const [sidebarProfileRefreshKey, setSidebarProfileRefreshKey] = useState(0)
+  const [draftModel, setDraftModel] = useState('')
+  // 欢迎页（尚无会话）时挂载的知识库草稿；首次发送建会话时落到会话上。
+  const [draftKnowledgeBaseIds, setDraftKnowledgeBaseIds] = useState<string[]>([])
+  const [draftForceKnowledgeSearch, setDraftForceKnowledgeSearch] = useState(false)
+  const [skills, setSkills] = useState<SkillMeta[]>([])
+  const [disabledSkillIds, setDisabledSkillIds] = useState<string[]>([])
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('chat')
+  const [uiLang, setUiLang] = useState<Lang>('zh')
+  const [extensionsNavItem, setExtensionsNavItem] = useState<ExtensionsNavItem | null>(null)
+  const [enabledTools, setEnabledTools] = useState<ChatToolDefinition[]>([])
+  const [mcpServers, setMcpServers] = useState<ChatMcpServer[]>([])
+  const [webSearchEnabled, setWebSearchEnabled] = useState(true)
+  const [enabledToolCount, setEnabledToolCount] = useState<number | null>(null)
+  const [toolsDisabledReason, setToolsDisabledReason] = useState('')
+  const [toolsRequested, setToolsRequested] = useState(false)
+  const [pendingToolConfirm, setPendingToolConfirm] = useState<ChatToolConfirmPayload | null>(null)
+  const [pendingSessionConsent, setPendingSessionConsent] = useState<ChatSessionConsentPayload | null>(null)
+  const [contextState, setContextState] = useState<ConversationContextState | null>(null)
+  const [contextLoading, setContextLoading] = useState(false)
+  const [contextCompressing, setContextCompressing] = useState(false)
+  const [agentLoopCompacting, setAgentLoopCompacting] = useState(false)
+  const [piRuntimeStatus, setPiRuntimeStatus] = useState('')
+  const [animateCompactionBoundaryId, setAnimateCompactionBoundaryId] = useState<string | null>(null)
+  const [contextError, setContextError] = useState('')
+  const [imageViewerItem, setImageViewerItem] = useState<ChatImageViewerItem | null>(null)
+  const currentConversationIdRef = useRef<string | null>(null)
+  // 始终指向最新 currentConversation。消息操作 handler（编辑/删除/重发）借此读取最新会话，
+  // 而无需把 currentConversation 列进 useCallback 依赖——否则每次切模型/思考等级（currentConversation
+  // 换引用）这些 handler 都换身份，打穿 MessageBubble 的 memo 导致全列表重渲（公式 remount 闪烁）。
+  const currentConversationRef = useRef(currentConversation)
+  currentConversationRef.current = currentConversation
+  const activeRunIdRef = useRef<string | null>(null)
+  const locallyCancelledConversationIdRef = useRef<string | null>(null)
+  const locallyCancelledRunIdRef = useRef<string | null>(null)
+  const inFlightConversationsRef = useRef<Set<string>>(new Set())
+  const externalSendQueueRef = useRef<ChatExternalSendRequest[]>([])
+  const externalSendDrainProcessingRef = useRef(false)
+  const externalSendDrainRequestedRef = useRef(false)
+  const pendingStreamDoneRef = useRef<Record<string, () => Promise<void>>>({})
+  const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
+  const streamErrorsRef = useRef<Record<string, string>>({})
+  const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload>>({})
+  const pendingSessionConsentsRef = useRef<Record<string, ChatSessionConsentPayload>>({})
+  const streamStartedAtRef = useRef<number | null>(null)
+  const streamingContentRef = useRef('')
+  const streamingReasoningRef = useRef('')
+  const settingsRef = useRef<SettingsShellHandle>(null)
+  const pendingAfterSettingsCloseRef = useRef<(() => void) | null>(null)
+  // A 合帧（render coalescing）：高频 stream/tool/subagent/userprompt 事件不再每条都同步
+  // setState 重渲，而是把"待显示的快照"记到 ref，用 requestAnimationFrame 每帧最多 flush 一次。
+  const pendingStreamRenderRef = useRef<{ conversationId: string; snapshot: ConversationStreamSnapshot } | null>(null)
+  const streamRenderRafRef = useRef<number | null>(null)
+
+  useEffect(() => onChatImageViewerOpen(setImageViewerItem), [])
+
+  const syncGeneratingConversationIds = useCallback(() => {
+    setGeneratingConversationIds(collectGeneratingConversationIds(
+      inFlightConversationsRef.current,
+      streamSnapshotsRef.current,
+      pendingToolConfirmsRef.current,
+    ))
+  }, [])
+
+  const markConversationInFlight = useCallback((conversationId: string) => {
+    inFlightConversationsRef.current.add(conversationId)
+    syncGeneratingConversationIds()
+  }, [syncGeneratingConversationIds])
+
+  const clearConversationInFlight = useCallback((conversationId: string) => {
+    inFlightConversationsRef.current.delete(conversationId)
+    syncGeneratingConversationIds()
+  }, [syncGeneratingConversationIds])
+
+  // B：彻底把一个会话从所有本地乐观/in-flight/快照状态中剔除（ghost 清理）。
+  // 不触碰 currentConversation/route，由调用方按场景决定。
+  const dropConversationLocally = useCallback((conversationId: string) => {
+    inFlightConversationsRef.current.delete(conversationId)
+    delete streamSnapshotsRef.current[conversationId]
+    delete pendingToolConfirmsRef.current[conversationId]
+    delete pendingSessionConsentsRef.current[conversationId]
+    delete pendingStreamDoneRef.current[conversationId]
+    delete streamErrorsRef.current[conversationId]
+    // 若该会话还挂着待刷新的合帧，连带取消，避免被剔除的 ghost 还闪一帧。
+    if (pendingStreamRenderRef.current?.conversationId === conversationId) {
+      if (streamRenderRafRef.current != null) {
+        cancelAnimationFrame(streamRenderRafRef.current)
+        streamRenderRafRef.current = null
+      }
+      pendingStreamRenderRef.current = null
+    }
+    setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
+    syncGeneratingConversationIds()
+  }, [syncGeneratingConversationIds])
+
+  const setStreamErrorForConversation = useCallback((conversationId: string, error: string) => {
+    if (error) {
+      streamErrorsRef.current[conversationId] = error
+    } else {
+      delete streamErrorsRef.current[conversationId]
+    }
+    if (currentConversationIdRef.current === conversationId) {
+      setStreamCoarse({ streamError: error })
+    }
+  }, [])
+
+  const isCurrentConversationBusy = useCallback(() => (
+    isConversationBusy(
+      currentConversationIdRef.current,
+      inFlightConversationsRef.current,
+      streamSnapshotsRef.current,
+    )
+  ), [])
+
+  const applyConversation = useCallback((conversation: Conversation | null) => {
+    // 兜底网：后端已在所有返回 Conversation 的命令出口剥离 model_messages/api_messages
+    // （strip_transcripts_for_frontend），所以正常路径到这里已是轻量副本。这里再剥一次，确保
+    // 任何遗漏/未来新增的后端出口都不会把这两份前端永不读的转录留进 React state。后端回放读盘
+    // 上完整副本，不受影响。
+    if (conversation?.messages) {
+      for (const m of conversation.messages) {
+        if (m.role !== 'assistant') continue
+        m.model_messages = undefined
+        m.modelMessages = undefined
+        m.api_messages = undefined
+        m.apiMessages = undefined
+      }
+    }
+    setCurrentConversation(conversation)
+    setContextState(conversation?.context_state ?? conversation?.contextState ?? null)
+  }, [])
+
+  // 纯元数据更新（模型 / 思考等级 / 知识库挂载等）：合并后端返回的新元数据，但**保留现有
+  // messages 数组引用**。否则每条消息都变成新对象，击穿 MessageBubble/ChatMarkdown 的 memo，
+  // 历史消息里的 LaTeX 会整屏重渲闪一下。这类更新后端不会改 messages，沿用旧引用安全。
+  const applyConversationMeta = useCallback((updated: Conversation) => {
+    setCurrentConversation((prev) =>
+      prev && prev.id === updated.id ? { ...updated, messages: prev.messages } : updated,
+    )
+  }, [])
+
+  const patchContextState = useCallback((nextState: ConversationContextState) => {
+    setContextState((prev) => {
+      const merged = mergeCompactionContextState(prev, nextState)
+      setCurrentConversation((conversation) => conversation
+        ? { ...conversation, context_state: merged, contextState: merged }
+        : conversation)
+      return merged
+    })
+  }, [])
+
+  const patchAgentTodoState = useCallback((nextState: AgentTodoState) => {
+    setCurrentConversation((prev) => prev
+      ? { ...prev, agent_todo_state: nextState, agentTodoState: nextState }
+      : prev)
+  }, [])
+
+  const patchAgentPlanState = useCallback((nextState: AgentPlanState) => {
+    setCurrentConversation((prev) => prev
+      ? { ...prev, agent_plan_state: nextState, agentPlanState: nextState }
+      : prev)
+  }, [])
+
+  const clearStreamingPreview = useCallback(() => {
+    // 取消挂起的合帧，避免旧快照在清空后又被刷回来产生空帧/串帧。
+    if (streamRenderRafRef.current != null) {
+      cancelAnimationFrame(streamRenderRafRef.current)
+      streamRenderRafRef.current = null
+    }
+    pendingStreamRenderRef.current = null
+    // 内容回空闲 + streaming/frozen/cancelling 归位；streamError 不动（与原语义一致）。
+    resetStreamStore()
+    activeRunIdRef.current = null
+    streamStartedAtRef.current = null
+    streamingContentRef.current = ''
+    streamingReasoningRef.current = ''
+  }, [])
+
+  const ensureStreamSnapshot = useCallback((conversationId: string) => {
+    const existing = streamSnapshotsRef.current[conversationId]
+    if (existing) return existing
+    const snapshot = createEmptyStreamSnapshot()
+    streamSnapshotsRef.current[conversationId] = snapshot
+    syncGeneratingConversationIds()
+    return snapshot
+  }, [syncGeneratingConversationIds])
+
+  const restoreStreamingPreview = useCallback((conversationId: string | null) => {
+    // 切换会话/恢复预览前取消任何挂起的合帧，避免上一个会话的快照被刷到当前视图。
+    if (streamRenderRafRef.current != null) {
+      cancelAnimationFrame(streamRenderRafRef.current)
+      streamRenderRafRef.current = null
+    }
+    pendingStreamRenderRef.current = null
+    if (!conversationId) {
+      clearStreamingPreview()
+      setPendingToolConfirm(null)
+      setPendingSessionConsent(null)
+      setStreamCoarse({ streamError: '' })
+      return
+    }
+    const snapshot = streamSnapshotsRef.current[conversationId]
+    if (!snapshot) {
+      clearStreamingPreview()
+    } else {
+      setStreamSnapshot(snapshot)
+      setStreamCoarse({ streaming: snapshot.streaming, streamFrozen: false, cancelling: false })
+      activeRunIdRef.current = snapshot.runId
+      streamStartedAtRef.current = snapshot.startedAt
+      streamingContentRef.current = snapshot.content
+      streamingReasoningRef.current = snapshot.reasoning
+    }
+    setStreamCoarse({ streamError: streamErrorsRef.current[conversationId] ?? '' })
+    setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId] ?? null)
+    setPendingSessionConsent(pendingSessionConsentsRef.current[conversationId] ?? null)
+  }, [clearStreamingPreview])
+
+  const applyStreamSnapshotToState = useCallback((snapshot: ConversationStreamSnapshot) => {
+    setStreamSnapshot(snapshot)
+    setStreamCoarse({ streaming: snapshot.streaming, cancelling: false })
+    activeRunIdRef.current = snapshot.runId
+    streamStartedAtRef.current = snapshot.startedAt
+    streamingContentRef.current = snapshot.content
+    streamingReasoningRef.current = snapshot.reasoning
+  }, [])
+
+  // 立即把挂起帧刷出去（done/结束、卸载、切换会话前调用），保证不丢最后一帧。
+  const flushStreamRender = useCallback(() => {
+    if (streamRenderRafRef.current != null) {
+      cancelAnimationFrame(streamRenderRafRef.current)
+      streamRenderRafRef.current = null
+    }
+    const pending = pendingStreamRenderRef.current
+    pendingStreamRenderRef.current = null
+    if (!pending) return
+    if (currentConversationIdRef.current !== pending.conversationId) return
+    applyStreamSnapshotToState(pending.snapshot)
+  }, [applyStreamSnapshotToState])
+
+  // 取消挂起帧而不应用（切换会话/卸载时调用，避免把旧会话快照刷到新会话）。
+  // 注：clearStreamingPreview / restoreStreamingPreview 已内联同样的取消逻辑。
+
+  // A 合帧：事件本身仍即时累积到 snapshot 对象，这里只把"渲染"节流到每帧一次。
+  // immediate=true（done 等终止帧）立即 flush，不再等下一帧。
+  const showStreamSnapshotIfCurrent = useCallback((
+    conversationId: string,
+    snapshot: ConversationStreamSnapshot,
+    immediate = false,
+  ) => {
+    if (currentConversationIdRef.current !== conversationId) return
+    pendingStreamRenderRef.current = { conversationId, snapshot }
+    if (immediate) {
+      flushStreamRender()
+      return
+    }
+    if (streamRenderRafRef.current != null) return
+    streamRenderRafRef.current = requestAnimationFrame(() => {
+      streamRenderRafRef.current = null
+      const pending = pendingStreamRenderRef.current
+      pendingStreamRenderRef.current = null
+      if (!pending) return
+      if (currentConversationIdRef.current !== pending.conversationId) return
+      applyStreamSnapshotToState(pending.snapshot)
+    })
+  }, [applyStreamSnapshotToState, flushStreamRender])
+
+  useEffect(() => () => {
+    if (streamRenderRafRef.current != null) {
+      cancelAnimationFrame(streamRenderRafRef.current)
+      streamRenderRafRef.current = null
+    }
+    // 卸载时清掉所有活跃多答组，避免遗留列快照。
+    resetGroups()
+  }, [])
+
+  const clearStreamSnapshot = useCallback((conversationId: string | null) => {
+    if (!conversationId) return
+    delete streamSnapshotsRef.current[conversationId]
+    delete pendingToolConfirmsRef.current[conversationId]
+    delete pendingSessionConsentsRef.current[conversationId]
+    syncGeneratingConversationIds()
+    if (currentConversationIdRef.current === conversationId) {
+      setPendingToolConfirm(null)
+      setPendingSessionConsent(null)
+      clearStreamingPreview()
+    }
+  }, [clearStreamingPreview, syncGeneratingConversationIds])
+
+  const cancelCurrentRunLocally = useCallback(() => {
+    locallyCancelledConversationIdRef.current = currentConversationIdRef.current
+    locallyCancelledRunIdRef.current = activeRunIdRef.current
+    // 立即停掉"生成中"视觉（撤掉取消按钮 + 停 shimmer），但保留已生成文本：
+    // 切到 frozen 态冻结展示，等 send invoke 返回持久化消息时由
+    // finishStreamingRunWithConversation 无缝替换（clearStreamingPreview 会清除 frozen）。
+    // 后续迟到的流事件已被 isLocallyCancelledPayload 过滤，预览不会再变动。
+    setStreamCoarse({ streaming: false, streamFrozen: true })
+    patchStreamSnapshot({ reasoningStreaming: false })
+    const conversationId = currentConversationIdRef.current
+    if (conversationId) {
+      delete pendingToolConfirmsRef.current[conversationId]
+      delete pendingSessionConsentsRef.current[conversationId]
+    }
+    setPendingToolConfirm(null)
+    setPendingSessionConsent(null)
+  }, [])
+
+  const resetLocalCancellation = useCallback(() => {
+    locallyCancelledConversationIdRef.current = null
+    locallyCancelledRunIdRef.current = null
+  }, [])
+
+  const currentConversationIsBlank = isPlainBlankConversation(currentConversation)
+  const managedAccountReady = canUseManagedBeefApiAccount(beefApiAccount.state)
+  const managedAllowedModels = beefApiAccount.state.allowedModels
+    ?? (beefApiAccount.state.defaultModel ? [beefApiAccount.state.defaultModel] : [])
+  const activeProviderId = 'beefapi-managed'
+  const activeModel = currentConversation && !currentConversationIsBlank
+    ? currentConversation.model
+    : managedAccountReady
+      ? resolveManagedModelValue(draftModel, beefApiAccount.state.defaultModel, managedAllowedModels)
+      : draftModel
+  const managedBeefApiRoute = true
+  // 多模型一问多答（任务 06-30）：当前生效的多答模型集（会话级持久 reply_models，欢迎页用草稿）。
+  const activeReplyModels = useMemo<ModelRef[]>(
+    () => (currentConversation && !currentConversationIsBlank
+      ? currentConversation.reply_models ?? currentConversation.replyModels ?? []
+      : []),
+    [currentConversation, currentConversationIsBlank],
+  )
+  const storedActiveSkillId = currentConversation
+    ? currentConversation.active_skill_id ?? currentConversation.activeSkillId ?? null
+    : null
+  // 当前会话自身所属项目（id + 名 folder）。传给输入栏，使从「最近」打开的项目内对话
+  // 也能在项目按钮上显示其项目，即便导航态 selectedProject 已被清空。
+  const conversationProject = useMemo<{ id: string; name: string } | null>(() => {
+    const id = currentConversation?.project_id ?? currentConversation?.projectId ?? null
+    if (!id) return null
+    return { id, name: currentConversation?.folder ?? '' }
+  }, [currentConversation?.project_id, currentConversation?.projectId, currentConversation?.folder])
+  const enabledSkills = useMemo(
+    () => skills.filter((skill) => !disabledSkillIds.includes(skill.id)),
+    [disabledSkillIds, skills],
+  )
+  const effectiveSkillId = useMemo(() => {
+    if (
+      storedActiveSkillId
+      && enabledSkills.some((skill) => skill.id === storedActiveSkillId)
+    ) {
+      return storedActiveSkillId
+    }
+    return null
+  }, [enabledSkills, storedActiveSkillId])
+  const effectiveSkill = useMemo(
+    () => enabledSkills.find((skill) => skill.id === effectiveSkillId) ?? null,
+    [effectiveSkillId, enabledSkills],
+  )
+  const effectiveSkillRecommendedTools = useMemo(
+    () => skillRecommendedTools(effectiveSkill),
+    [effectiveSkill],
+  )
+
+  const currentAssistantSnapshot =
+    currentConversation?.assistant_snapshot ?? currentConversation?.assistantSnapshot ?? null
+  const currentAssistantId =
+    currentConversation?.assistant_id
+    ?? currentConversation?.assistantId
+    ?? currentAssistantSnapshot?.id
+    ?? null
+
+  const refreshToolIndicator = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      setEnabledTools([])
+      setEnabledToolCount(null)
+      setToolsDisabledReason('')
+      setToolsRequested(false)
+      setMcpServers([])
+      return
+    }
+    try {
+      const settings = await getSettingsCached()
+      const chatTools = settings.chatTools
+      setMcpServers(chatTools?.servers ?? [])
+      setWebSearchEnabled(chatTools?.nativeTools?.webSearch !== false)
+      const nextDisabledSkillIds = chatTools?.disabledSkillIds ?? []
+      setDisabledSkillIds((prev) =>
+        prev.length === nextDisabledSkillIds.length
+        && prev.every((id, index) => id === nextDisabledSkillIds[index])
+          ? prev
+          : nextDisabledSkillIds,
+      )
+      if (!chatTools) {
+        setEnabledTools([])
+        setEnabledToolCount(null)
+        setToolsDisabledReason('')
+        setToolsRequested(false)
+        return
+      }
+      const anyMcpEnabled = chatTools.enabled && chatTools.servers.some((server) => server.enabled)
+      const anyNativeEnabled = hasEnabledNativeBuiltinTool(chatTools.nativeTools)
+      const skillRuntimeEnabled = hasEnabledSkillRuntime(chatTools.nativeTools)
+      const requested = anyMcpEnabled || anyNativeEnabled || skillRuntimeEnabled
+      setToolsRequested(requested)
+      if (!requested) {
+        setEnabledTools([])
+        setEnabledToolCount(null)
+        setToolsDisabledReason('')
+        return
+      }
+      const result = await api.chatMcpListTools()
+      const tools = result.success ? result.tools : []
+      setEnabledTools(tools)
+      setEnabledToolCount(tools.length)
+      setToolsDisabledReason(result.success ? '' : result.error || '工具不可用')
+    } catch (err) {
+      setEnabledTools([])
+      setToolsRequested(false)
+      setEnabledToolCount(null)
+      setToolsDisabledReason(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
+
+  const handleToggleMcpServer = useCallback(async (serverId: string) => {
+    try {
+      // 读-改-写：现读后端最新态，避免用缓存快照 map servers[] 时把后端刚 OAuth 刷新的
+      // token 覆盖回旧值（见 handleApprovalPolicyChange 注释）。
+      const settings = await refreshSettings()
+      const servers = (settings.chatTools?.servers ?? []).map((server) =>
+        server.id === serverId ? { ...server, enabled: !server.enabled } : server,
+      )
+      // 乐观更新本地列表（开关即时反馈），保存后由 refreshToolIndicator 校正。
+      setMcpServers(servers)
+      await saveSettingsCached({
+        ...settings,
+        chatTools: { ...settings.chatTools, servers },
+      })
+      onSettingsChange()
+      await refreshToolIndicator()
+    } catch (err) {
+      console.error('Failed to toggle MCP server:', err)
+      void refreshToolIndicator()
+    }
+  }, [onSettingsChange, refreshToolIndicator])
+
+  const handleToggleWebSearch = useCallback(async () => {
+    try {
+      const settings = await refreshSettings()
+      const nativeTools = settings.chatTools?.nativeTools
+      const next = !(nativeTools?.webSearch !== false)
+      setWebSearchEnabled(next)
+      await saveSettingsCached({
+        ...settings,
+        chatTools: {
+          ...settings.chatTools,
+          nativeTools: { ...(nativeTools ?? {}), webSearch: next },
+        },
+      })
+      onSettingsChange()
+      await refreshToolIndicator()
+    } catch (err) {
+      console.error('Failed to toggle web search:', err)
+      void refreshToolIndicator()
+    }
+  }, [onSettingsChange, refreshToolIndicator])
+
+  const unavailableRecommendedTools = useMemo(
+    () =>
+      effectiveSkillRecommendedTools.filter(
+        (recommended) => !enabledTools.some((tool) => toolMatchesRecommendation(tool, recommended)),
+      ),
+    [effectiveSkillRecommendedTools, enabledTools],
+  )
+
+  const toolStatusHint = useMemo(() => {
+    if (toolsDisabledReason && (enabledToolCount ?? 0) === 0 && (toolsRequested || effectiveSkillRecommendedTools.length > 0)) {
+      if (toolsDisabledReason.includes('不支持 tools') && effectiveSkillId) {
+        return toolsDisabledReason
+      }
+      return effectiveSkillRecommendedTools.length > 0
+        ? `当前 Skill 需要工具，但${toolsDisabledReason}`
+        : toolsDisabledReason
+    }
+    if (toolsDisabledReason && (enabledToolCount ?? 0) === 0) {
+      return ''
+    }
+    if (unavailableRecommendedTools.length > 0) {
+      return `当前 Skill 推荐的工具不可用：${unavailableRecommendedTools.slice(0, 3).join(', ')}`
+    }
+    return ''
+  }, [effectiveSkillId, effectiveSkillRecommendedTools.length, enabledToolCount, toolsDisabledReason, toolsRequested, unavailableRecommendedTools])
+
+  const sendDisabledReason = !managedAccountReady
+    ? '请先登录 BeefAPI，再开始 Pi Task'
+    : effectiveSkillRecommendedTools.length > 0
+      ? toolStatusHint
+      : ''
+
+  const getRouteConversationId = useCallback(() => {
+    const path = hashPath()
+    if (!path.startsWith('chat/')) return null
+    const rest = path.slice('chat/'.length)
+    if (rest === 'settings' || rest.startsWith('settings/')) return null
+    if (rest === 'assistants' || rest.startsWith('assistants/')) return null
+    if (rest === 'skill' || rest.startsWith('skill/')) return null
+    if (rest === 'onboarding' || rest.startsWith('onboarding/')) return null
+    return decodeURIComponent(rest)
+  }, [])
+
+  const syncConversationRoute = useCallback((conversationId: string | null) => {
+    const nextHash = conversationId ? `#chat/${encodeURIComponent(conversationId)}` : '#chat'
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash
+    }
+  }, [])
+
+  const syncSettingsRoute = useCallback(() => {
+    if (window.location.hash !== '#chat/settings') {
+      window.location.hash = '#chat/settings'
+    }
+  }, [])
+
+  const syncOnboardingRoute = useCallback(() => {
+    if (window.location.hash !== '#chat/onboarding') {
+      window.location.hash = '#chat/onboarding'
+    }
+  }, [])
+
+  const handleOnboardingExit = useCallback(() => {
+    setChatView('conversation')
+    syncConversationRoute(null)
+  }, [syncConversationRoute])
+
+  const syncAssistantCenterRoute = useCallback(() => {
+    if (window.location.hash !== '#chat/assistants') {
+      window.location.hash = '#chat/assistants'
+    }
+  }, [])
+
+  const syncSkillCenterRoute = useCallback(() => {
+    if (window.location.hash !== '#chat/skill') {
+      window.location.hash = '#chat/skill'
+    }
+  }, [])
+
+  const refreshSidebar = useCallback(() => {
+    setSidebarRefreshKey((key) => key + 1)
+  }, [])
+
+  const loadDefaultModel = useCallback(async () => {
+    try {
+      const settings = await getSettingsCached()
+      setUiLang((settings.settingsLanguage as Lang) || 'zh')
+      const chatDefault = settings.defaultModels.chat
+      if (chatDefault.providerId) {
+        setDraftModel(chatDefault.model)
+      } else if (settings.lens?.providerId) {
+        setDraftModel(settings.lens.model || '')
+      } else {
+        setDraftModel(settings.translatorModel || '')
+      }
+    } catch {
+      setDraftModel('dev-model')
+    }
+  }, [])
+
+  const loadSkills = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      setSkills([])
+      return
+    }
+    try {
+      const result = await api.chatSkillsList()
+      if (result.success) {
+        setSkills(result.skills.map(normalizeSkill))
+        if (result.error) {
+          console.warn('Some chat skills could not be loaded:', result.error)
+        }
+      } else {
+        setSkills([])
+        console.error('Failed to load chat skills:', result.error)
+      }
+    } catch (err) {
+      console.error('Failed to load chat skills:', err)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadDefaultModel()
+    const cancelIdleLoad = scheduleIdleTask(() => {
+      void loadSkills()
+    })
+    return cancelIdleLoad
+  }, [loadDefaultModel, loadSkills])
+
+  useEffect(() => {
+    return scheduleIdleTask(() => {
+      void refreshToolIndicator()
+    }, 1500)
+  }, [refreshToolIndicator])
+
+  // 空闲预取设置页 chunk，避免首次点开设置时才触发 lazy import 而长时间转圈。
+  useEffect(() => {
+    return scheduleIdleTask(() => {
+      void importSettingsShell()
+    }, 2500)
+  }, [])
+
+  const openEmbeddedSettings = useCallback((tab: SettingsTab = 'chat') => {
+    setSettingsInitialTab(tab)
+    setChatView('settings')
+    syncSettingsRoute()
+  }, [syncSettingsRoute])
+
+  const openAssistantCenter = useCallback(() => {
+    setChatView('assistants')
+    syncAssistantCenterRoute()
+  }, [syncAssistantCenterRoute])
+
+  const openSkillCenter = useCallback(() => {
+    setChatView('skill')
+    syncSkillCenterRoute()
+  }, [syncSkillCenterRoute])
+
+  const openExtensionsItem = useCallback((item: ExtensionsNavItem) => {
+    setExtensionsNavItem(item)
+    if (item === 'assistants') {
+      openAssistantCenter()
+      return
+    }
+    if (item === 'skill') {
+      openSkillCenter()
+      return
+    }
+    openEmbeddedSettings(item)
+  }, [openAssistantCenter, openSkillCenter, openEmbeddedSettings])
+
+  const extensionsActive = useMemo<ExtensionsNavItem | null>(() => {
+    if (chatView === 'assistants') return 'assistants'
+    if (chatView === 'skill') return 'skill'
+    if (chatView === 'settings' && extensionsNavItem === 'knowledge') return 'knowledge'
+    return null
+  }, [chatView, extensionsNavItem])
+
+  const handleSettingsClose = useCallback(() => {
+    setChatView('conversation')
+    syncConversationRoute(currentConversationIdRef.current)
+    void loadSkills()
+    void refreshToolIndicator()
+    const pending = pendingAfterSettingsCloseRef.current
+    pendingAfterSettingsCloseRef.current = null
+    pending?.()
+  }, [loadSkills, refreshToolIndicator, syncConversationRoute])
+
+  const handleAssistantCenterClose = useCallback(() => {
+    setChatView('conversation')
+    syncConversationRoute(currentConversationIdRef.current)
+  }, [syncConversationRoute])
+
+  const handleSkillCenterClose = useCallback(() => {
+    setChatView('conversation')
+    syncConversationRoute(currentConversationIdRef.current)
+    void loadSkills()
+  }, [loadSkills, syncConversationRoute])
+
+  const runAfterLeavingSettings = useCallback((action: () => void) => {
+    if (chatView !== 'settings') {
+      action()
+      return
+    }
+    if (!settingsRef.current) {
+      setChatView('conversation')
+      syncConversationRoute(currentConversationIdRef.current)
+      action()
+      return
+    }
+    pendingAfterSettingsCloseRef.current = action
+    settingsRef.current?.requestClose()
+  }, [chatView, syncConversationRoute])
+
+  const handleSettingsChange = useCallback(() => {
+    onSettingsChange()
+    void loadDefaultModel()
+    void loadSkills()
+    void refreshToolIndicator()
+    setSidebarProfileRefreshKey((key) => key + 1)
+  }, [loadDefaultModel, loadSkills, onSettingsChange, refreshToolIndicator])
+
+  const reloadConversation = useCallback(async (conversationId: string, options?: { force?: boolean }) => {
+    if (isConversationInFlight(inFlightConversationsRef.current, conversationId) && !options?.force) {
+      return
+    }
+    try {
+      const conv = await chatApi.getConversation(conversationId)
+      currentConversationIdRef.current = conversationId
+      applyConversation(conv)
+      restoreStreamingPreview(conversationId)
+      setStreamCoarse({ cancelling: false })
+    } catch (err) {
+      console.error('Failed to reload conversation:', err)
+      // B2：reload 失败（尤其"对话不存在"）——把 ghost 从乐观列表/in-flight/快照剔除并刷新侧栏。
+      dropConversationLocally(conversationId)
+      forgetRememberedChatRoute()
+      if (currentConversationIdRef.current === conversationId || currentConversationIdRef.current === null) {
+        currentConversationIdRef.current = null
+        applyConversation(null)
+        syncConversationRoute(null)
+      }
+      refreshSidebar()
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '对话加载失败，已从列表移除')
+    }
+  }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
+
+  const refreshContextStats = useCallback(async (conversationId?: string) => {
+    const targetConversationId = conversationId ?? currentConversationIdRef.current
+    if (!targetConversationId) {
+      setContextState(null)
+      setContextError('')
+      return
+    }
+    setContextLoading(true)
+    setContextError('')
+    try {
+      const result = await chatApi.getContextStats(targetConversationId)
+      if (currentConversationIdRef.current === targetConversationId) {
+        patchContextState(result.contextState)
+      }
+    } catch (err) {
+      if (currentConversationIdRef.current === targetConversationId) {
+        setContextError(typeof err === 'string' ? err : (err as Error).message || '上下文统计失败')
+      }
+    } finally {
+      if (currentConversationIdRef.current === targetConversationId) {
+        setContextLoading(false)
+      }
+    }
+  }, [patchContextState])
+
+  const handleRefreshContext = useCallback(() => {
+    const conversationId = currentConversationIdRef.current
+    if (conversationId) void refreshContextStats(conversationId)
+  }, [refreshContextStats])
+
+  const handleCompressContext = useCallback(async () => {
+    const conversationId = currentConversationIdRef.current
+    if (!conversationId || contextCompressing) return
+    setContextCompressing(true)
+    setContextError('')
+    try {
+      const result = await chatApi.compressContext(conversationId)
+      if (currentConversationIdRef.current === conversationId) {
+        const latestId = latestCompactionBoundaryId(result.contextState)
+        if (latestId) {
+          setAnimateCompactionBoundaryId(latestId)
+          window.setTimeout(() => {
+            setAnimateCompactionBoundaryId((current) => (current === latestId ? null : current))
+          }, 1800)
+        }
+        patchContextState(result.contextState)
+        refreshSidebar()
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, 360)
+        })
+      }
+    } catch (err) {
+      if (currentConversationIdRef.current === conversationId) {
+        setContextError(typeof err === 'string' ? err : (err as Error).message || '上下文压缩失败')
+      }
+    } finally {
+      if (currentConversationIdRef.current === conversationId) {
+        setContextCompressing(false)
+      }
+    }
+  }, [contextCompressing, patchContextState, refreshSidebar])
+
+  const finishStreamingRun = useCallback(
+    async (payload: { reason?: string; conversationId?: string }) => {
+      const conversationId = payload.conversationId ?? currentConversationIdRef.current
+      // 兜底：run 结束时压缩必然已终止；防御后端遗漏终止事件把"压缩中"状态卡死。
+      setAgentLoopCompacting(false)
+      if (payload.reason !== 'cancelled') {
+        resetLocalCancellation()
+      }
+      if (payload.reason === 'error' && conversationId) {
+        setStreamErrorForConversation(
+          conversationId,
+          streamErrorsRef.current[conversationId] || '回复生成失败，请稍后重试。',
+        )
+      }
+      if (conversationId && payload.reason !== 'cancelled') {
+        if (currentConversationIdRef.current === conversationId) {
+          await reloadConversation(conversationId, { force: true })
+        }
+        refreshSidebar()
+      }
+      if (conversationId) {
+        delete streamSnapshotsRef.current[conversationId]
+        delete pendingToolConfirmsRef.current[conversationId]
+        delete pendingSessionConsentsRef.current[conversationId]
+        syncGeneratingConversationIds()
+      }
+      if (conversationId && currentConversationIdRef.current === conversationId) {
+        setPendingToolConfirm(null)
+        setPendingSessionConsent(null)
+        clearStreamingPreview()
+      }
+    },
+    [clearStreamingPreview, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+  )
+
+  const flushPendingStreamDone = useCallback(async (conversationId?: string): Promise<boolean> => {
+    if (conversationId) {
+      const pending = pendingStreamDoneRef.current[conversationId]
+      delete pendingStreamDoneRef.current[conversationId]
+      if (!pending) return false
+      await pending()
+      return true
+    }
+    const pendingByConversation = pendingStreamDoneRef.current
+    pendingStreamDoneRef.current = {}
+    let flushed = false
+    for (const pending of Object.values(pendingByConversation)) {
+      await pending()
+      flushed = true
+    }
+    return flushed
+  }, [])
+
+  const finishStreamingRunWithConversation = useCallback((
+    conversationId: string,
+    conversation: Conversation,
+  ) => {
+    if (currentConversationIdRef.current === conversationId) {
+      applyConversation(conversation)
+      setPendingToolConfirm(null)
+      setPendingSessionConsent(null)
+    }
+    delete streamSnapshotsRef.current[conversationId]
+    delete pendingToolConfirmsRef.current[conversationId]
+    delete pendingSessionConsentsRef.current[conversationId]
+    syncGeneratingConversationIds()
+    if (currentConversationIdRef.current === conversationId) {
+      clearStreamingPreview()
+    }
+  }, [applyConversation, clearStreamingPreview, syncGeneratingConversationIds])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatStream((payload) => {
+        if (cancelled) return
+        if (isLocallyCancelledPayload(
+          payload,
+          locallyCancelledConversationIdRef.current,
+          locallyCancelledRunIdRef.current,
+        )) {
+          return
+        }
+        if (!streamSnapshotsRef.current[payload.conversationId]) {
+          if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
+            if (payload.done) {
+              void finishStreamingRun(payload)
+            }
+            return
+          }
+        }
+        // 多答组分支（任务 06-30）：该会话处于多模型并发流时，按 messageId 路由到对应列，
+        // 不动会话级单流快照（单模型路径零回归）。
+        if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+          const column = ensureGroupColumn(
+            payload.conversationId,
+            payload.messageId,
+          )
+          if (!column) return
+          const segment = streamPayloadToSegment(payload)
+          applyStreamDeltaToSnapshot(column, payload, segment)
+          if (payload.done) {
+            finalizeReasoningDurationOnDone(column)
+            column.streaming = false
+            // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
+            flushGroups()
+          } else {
+            // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
+            touchGroup()
+          }
+          // 组的整体「done / 持久化」交给 sendMessage 返回后的统一收尾；这里不触发 finishStreamingRun。
+          return
+        }
+        const snapshot = ensureStreamSnapshot(payload.conversationId)
+        if (payload.runId) {
+          if (snapshot.runId && snapshot.runId !== payload.runId) return
+          snapshot.runId = payload.runId
+        }
+        const segment = streamPayloadToSegment(payload)
+        if (segment) {
+          snapshot.segments = upsertStreamSegment(
+            snapshot.segments,
+            segment,
+            segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
+          )
+        }
+        if (payload.reasoningDelta) {
+          const now = Date.now()
+          if (snapshot.reasoningStartedAt == null) {
+            snapshot.reasoningStartedAt = now
+          }
+          if (segment?.kind === 'reasoning') {
+            const segmentStartedAt = snapshot.reasoningStartedAtBySegmentId[segment.id] ?? now
+            snapshot.reasoningStartedAtBySegmentId[segment.id] = segmentStartedAt
+            updateReasoningSegmentDuration(snapshot, segment.id, now)
+          }
+          snapshot.streaming = true
+          snapshot.reasoningStreaming = true
+          snapshot.reasoning += payload.reasoningDelta
+          snapshot.reasoningDurationMs = Math.max(
+            snapshot.reasoningDurationMs ?? 0,
+            now - snapshot.reasoningStartedAt,
+          )
+        }
+        if (payload.delta) {
+          if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
+            snapshot.reasoningDurationMs = Math.max(
+              snapshot.reasoningDurationMs ?? 0,
+              Date.now() - snapshot.reasoningStartedAt,
+            )
+          }
+          if (segment?.kind === 'text') {
+            const activeReasoningSegment = findReasoningSegmentForText(snapshot.segments, segment)
+            if (activeReasoningSegment) {
+              updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
+            }
+          }
+          snapshot.streaming = true
+          snapshot.reasoningStreaming = false
+          snapshot.content += payload.delta
+        }
+        syncGeneratingConversationIds()
+        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
+        if (payload.done) {
+          if (snapshot.reasoningStartedAt != null && snapshot.reasoningStreaming) {
+            snapshot.reasoningDurationMs = Math.max(
+              snapshot.reasoningDurationMs ?? 0,
+              Date.now() - snapshot.reasoningStartedAt,
+            )
+            const activeReasoningSegment = [...snapshot.segments]
+              .reverse()
+              .find((item) => item.kind === 'reasoning')
+            if (activeReasoningSegment) {
+              updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
+            }
+          }
+          // done：立即 flush 最后一帧，别让合帧吞掉收尾内容。
+          showStreamSnapshotIfCurrent(payload.conversationId, snapshot, true)
+          // invoke 未完成前不要 reload；延后到 flushPendingStreamDone，避免与 send 写盘竞态。
+          if (isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
+            pendingStreamDoneRef.current[payload.conversationId] = () => finishStreamingRun(payload)
+            return
+          }
+          void finishStreamingRun(payload)
+        }
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [ensureStreamSnapshot, finishStreamingRun, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    const setupListener = async () => {
+      unlisten = await api.onChatPiRuntimeStatus((payload: ChatPiRuntimeStatusPayload) => {
+        if (cancelled || payload.conversationId !== currentConversationIdRef.current) return
+        const data = payload.data ?? {}
+        switch (payload.kind) {
+          case 'compaction_start':
+            setAgentLoopCompacting(true)
+            setPiRuntimeStatus('正在压缩上下文')
+            break
+          case 'compaction_end':
+            setAgentLoopCompacting(false)
+            setPiRuntimeStatus('')
+            break
+          case 'auto_retry_start': {
+            const attempt = typeof data.attempt === 'number' ? ` ${data.attempt}` : ''
+            setPiRuntimeStatus(`正在重试${attempt}`)
+            break
+          }
+          case 'auto_retry_end':
+          case 'agent_settled':
+            setPiRuntimeStatus('')
+            break
+          case 'queue_update': {
+            const steering = Array.isArray(data.steering) ? data.steering.length : 0
+            const followUp = Array.isArray(data.followUp) ? data.followUp.length : 0
+            const queued = steering + followUp
+            setPiRuntimeStatus(queued > 0 ? `队列 ${queued}` : '')
+            break
+          }
+          case 'thinking_level_changed':
+            if (typeof data.level === 'string') setPiRuntimeStatus(`思考等级 ${data.level}`)
+            break
+          default:
+            break
+        }
+      })
+      if (cancelled) unlisten()
+    }
+    void setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatContext((payload) => {
+        if (cancelled) return
+        const currentConversationId = currentConversationIdRef.current
+        if (!currentConversationId || payload.conversationId !== currentConversationId) {
+          return
+        }
+        patchContextState(payload.contextState)
+        setContextError('')
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [patchContextState])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatCompaction((payload) => {
+        if (cancelled) return
+        const currentConversationId = currentConversationIdRef.current
+        if (!currentConversationId || payload.conversationId !== currentConversationId) {
+          return
+        }
+        if (payload.phase === 'started') {
+          if (payload.trigger !== 'manual') {
+            setAgentLoopCompacting(true)
+          }
+          return
+        }
+        if (payload.trigger !== 'manual') {
+          setAgentLoopCompacting(false)
+        }
+        const boundary = payload.boundary
+        if (boundary?.id) {
+          setAnimateCompactionBoundaryId(boundary.id)
+          window.setTimeout(() => {
+            setAnimateCompactionBoundaryId((current) => (current === boundary.id ? null : current))
+          }, 1800)
+        }
+        if (boundary && payload.phase === 'completed') {
+          setCurrentConversation((conversation) => {
+            if (!conversation) return conversation
+            const prevState = conversation.context_state ?? conversation.contextState
+            const existing = prevState?.compaction_boundaries ?? prevState?.compactionBoundaries ?? []
+            if (existing.some((item) => item.id === boundary.id)) return conversation
+            const nextBoundaries = [...existing, boundary]
+            const nextState = {
+              ...(prevState ?? {}),
+              compaction_boundaries: nextBoundaries,
+              compactionBoundaries: nextBoundaries,
+            }
+            setContextState(nextState)
+            return { ...conversation, context_state: nextState, contextState: nextState }
+          })
+        }
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatTodo((payload) => {
+        if (cancelled) return
+        const currentConversationId = currentConversationIdRef.current
+        if (!currentConversationId || payload.conversationId !== currentConversationId) {
+          return
+        }
+        patchAgentTodoState(payload.todoState)
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [patchAgentTodoState])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatPlan((payload) => {
+        if (cancelled) return
+        const currentConversationId = currentConversationIdRef.current
+        if (!currentConversationId || payload.conversationId !== currentConversationId) {
+          return
+        }
+        patchAgentPlanState(payload.planState)
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [patchAgentPlanState])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatTool((payload) => {
+        if (cancelled) return
+        if (isLocallyCancelledPayload(
+          payload,
+          locallyCancelledConversationIdRef.current,
+          locallyCancelledRunIdRef.current,
+        )) {
+          return
+        }
+        // 忽略 invoke 结束后的迟到 tool 事件，否则会重新 setStreaming(true) 卡死输入栏。
+        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
+        // 多答组分支：按 messageId 路由到对应列。
+        if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+          const column = ensureGroupColumn(payload.conversationId, payload.messageId)
+          if (!column) return
+          const record = toolEventToRecord(payload)
+          applyToolRecordToSnapshot(column, record)
+          touchGroup()
+          return
+        }
+        const snapshot = ensureStreamSnapshot(payload.conversationId)
+        if (payload.runId) {
+          if (snapshot.runId && snapshot.runId !== payload.runId) return
+          snapshot.runId = payload.runId
+        }
+        const record = toolEventToRecord(payload)
+        snapshot.streaming = true
+        snapshot.reasoningStreaming = false
+        const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
+        snapshot.toolCalls = index < 0
+          ? [...snapshot.toolCalls, record]
+          : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+        snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
+        syncGeneratingConversationIds()
+        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
+
+  // Live nested sub-agent progress (P3): merge onto the parent tool card's
+  // structuredContent.subagentProgress, addressed by parentToolCallId.
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatSubagent((payload) => {
+        if (cancelled) return
+        // A `chat-subagent` progress event must address an existing snapshot for
+        // the parent conversation (do NOT create one — that would resurrect a
+        // finalized conversation). Accept whenever the conversation is in-flight
+        // or a snapshot already exists.
+        const existingSnapshot = streamSnapshotsRef.current[payload.parentConversationId]
+        const inFlight = isConversationInFlight(
+          inFlightConversationsRef.current,
+          payload.parentConversationId,
+        )
+        if (!inFlight && !existingSnapshot) return
+        const snapshot = ensureStreamSnapshot(payload.parentConversationId)
+        // Match the active run when known; only drop when both ids are set and differ.
+        if (payload.parentRunId && snapshot.runId && snapshot.runId !== payload.parentRunId) return
+        const index = snapshot.toolCalls.findIndex((item) => item.id === payload.parentToolCallId)
+        if (index < 0) return
+        const progress = {
+          taskId: payload.taskId,
+          name: payload.name,
+          model: payload.model ?? '',
+          depth: payload.depth,
+          status: payload.status,
+          preview: payload.preview ?? '',
+          steps: payload.steps ?? [],
+        }
+        // Sub-agents run blocking + single-result: the parent tool card transitions
+        // running→done via the `chat-tool` flow (the inline result), while these
+        // `chat-subagent` events drive the live nested progress (steps/preview).
+        snapshot.toolCalls = snapshot.toolCalls.map((item, i) => {
+          if (i !== index) return item
+          const existing =
+            item.structuredContent && typeof item.structuredContent === 'object'
+              ? (item.structuredContent as Record<string, unknown>)
+              : {}
+          const nextStructured: Record<string, unknown> = {
+            ...existing,
+            subagentProgress: progress,
+          }
+          return {
+            ...item,
+            structuredContent: nextStructured,
+          }
+        })
+        showStreamSnapshotIfCurrent(payload.parentConversationId, snapshot)
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatUserPrompt((payload) => {
+        if (cancelled) return
+        if (isLocallyCancelledPayload(
+          payload,
+          locallyCancelledConversationIdRef.current,
+          locallyCancelledRunIdRef.current,
+        )) {
+          return
+        }
+        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
+        const snapshot = ensureStreamSnapshot(payload.conversationId)
+        if (payload.runId) {
+          if (snapshot.runId && snapshot.runId !== payload.runId) return
+          snapshot.runId = payload.runId
+        }
+        const record = userPromptEventToRecord(payload)
+        snapshot.streaming = true
+        snapshot.reasoningStreaming = false
+        const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
+        snapshot.toolCalls = index < 0
+          ? [...snapshot.toolCalls, record]
+          : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+        syncGeneratingConversationIds()
+        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatToolConfirm((payload) => {
+        if (cancelled) return
+        pendingToolConfirmsRef.current[payload.conversationId] = payload
+        syncGeneratingConversationIds()
+        if (currentConversationIdRef.current === payload.conversationId) {
+          setPendingToolConfirm(payload)
+        }
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [syncGeneratingConversationIds])
+
+  const resolvePendingToolConfirm = useCallback((approved: boolean) => {
+    if (!pendingToolConfirm) return
+    delete pendingToolConfirmsRef.current[pendingToolConfirm.conversationId]
+    syncGeneratingConversationIds()
+    void api.chatConfirmToolCall(
+      pendingToolConfirm.conversationId,
+      pendingToolConfirm.runId,
+      pendingToolConfirm.toolCallId,
+      approved,
+    ).catch((error) => {
+      console.warn('Failed to resolve scoped tool approval:', error)
+      setStreamErrorForConversation(
+        pendingToolConfirm.conversationId,
+        uiLang === 'en'
+          ? 'This approval is no longer active. The task may have been cancelled or replaced.'
+          : '此审批已失效，任务可能已被取消或替换。',
+      )
+    })
+    setPendingToolConfirm(null)
+  }, [pendingToolConfirm, setStreamErrorForConversation, syncGeneratingConversationIds, uiLang])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatSessionConsent((payload) => {
+        if (cancelled) return
+        pendingSessionConsentsRef.current[payload.conversationId] = payload
+        if (currentConversationIdRef.current === payload.conversationId) {
+          setPendingSessionConsent(payload)
+        }
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [])
+
+  const resolvePendingSessionConsent = useCallback((granted: boolean) => {
+    if (!pendingSessionConsent) return
+    delete pendingSessionConsentsRef.current[pendingSessionConsent.conversationId]
+    void api.chatRespondSessionConsent(pendingSessionConsent.conversationId, granted)
+    setPendingSessionConsent(null)
+  }, [pendingSessionConsent])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    const setupListener = async () => {
+      unlisten = await api.onChatRunPython((payload) => {
+        if (cancelled) return
+        void (async () => {
+          try {
+            const { runPythonInSandbox } = await import('./pyodideClient')
+            const outcome = await runPythonInSandbox(payload.code, payload.timeoutMs, payload.files)
+            await api.chatPythonComplete(
+              payload.runId,
+              outcome.content,
+              outcome.isError,
+              outcome.artifacts,
+            )
+          } catch (err) {
+            const message = err instanceof Error
+              ? err.message || err.stack || err.name
+              : String(err)
+            await api.chatPythonComplete(
+              payload.runId,
+              `Python 沙盒调用失败：${message || 'Unknown error'}。不要使用 run_command/pip 安装或修改本机 Python 环境来绕过沙盒；请直接基于已有数据回答，除非用户明确要求修改本机环境。`,
+              true,
+              [],
+            )
+          }
+        })()
+      })
+      if (cancelled) {
+        unlisten()
+      }
+    }
+
+    setupListener()
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    currentConversationIdRef.current = currentConversation?.id ?? null
+  }, [currentConversation?.id])
+
+  useEffect(() => {
+    if (!currentConversation?.id || chatView !== 'conversation') {
+      setContextLoading(false)
+      return
+    }
+    void refreshContextStats(currentConversation.id)
+  }, [chatView, currentConversation?.id, activeModel, effectiveSkillId, refreshContextStats])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    api.onOpenSettings(() => {
+      if (cancelled) return
+      const path = hashPath()
+      if (!path.startsWith('chat')) return
+      openEmbeddedSettings()
+    }).then((dispose) => {
+      if (cancelled) {
+        dispose()
+      } else {
+        unlisten = dispose
+      }
+    })
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [openEmbeddedSettings])
+
+  useEffect(() => {
+    const loadFromRoute = () => {
+      const path = hashPath()
+      if (isChatOnboardingRoute(path)) {
+        setChatView('onboarding')
+        return
+      }
+      if (isChatSettingsPath(path)) {
+        setChatView('settings')
+        return
+      }
+      if (isChatAssistantCenterPath(path)) {
+        setChatView('assistants')
+        return
+      }
+      if (isChatSkillCenterPath(path)) {
+        setChatView('skill')
+        return
+      }
+      setChatView('conversation')
+      const conversationId = getRouteConversationId()
+      if (!conversationId) {
+        currentConversationIdRef.current = null
+        applyConversation(null)
+        restoreStreamingPreview(null)
+        return
+      }
+      void reloadConversation(conversationId, { force: true })
+    }
+    loadFromRoute()
+    window.addEventListener('hashchange', loadFromRoute)
+    return () => window.removeEventListener('hashchange', loadFromRoute)
+  }, [applyConversation, getRouteConversationId, reloadConversation, restoreStreamingPreview])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let cancelled = false
+    void getSettingsCached().then((settings) => {
+      if (cancelled) return
+      if (settings.onboardingStatus === 'pending' && !isChatOnboardingRoute(hashPath())) {
+        syncOnboardingRoute()
+      }
+    }).catch((err) => {
+      console.error('Failed to check onboarding status:', err)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [syncOnboardingRoute])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    if (beefApiAccount.state.phase === 'signed_out' && beefApiAccount.state.reason === 'initializing') return
+    if (managedAccountReady) return
+    if (chatView === 'onboarding' || chatView === 'settings') return
+    syncOnboardingRoute()
+  }, [
+    beefApiAccount.state.phase,
+    beefApiAccount.state.reason,
+    chatView,
+    managedAccountReady,
+    syncOnboardingRoute,
+  ])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    api.onChatOpenConversation((payload) => {
+      if (cancelled || !payload.conversationId) return
+      setChatView('conversation')
+      syncConversationRoute(payload.conversationId)
+      if (payload.reload !== false) {
+        void reloadConversation(payload.conversationId, { force: true })
+      }
+      refreshSidebar()
+    }).then((dispose) => {
+      if (cancelled) dispose()
+      else unlisten = dispose
+    }).catch(err => console.error(err))
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [refreshSidebar, reloadConversation, syncConversationRoute])
+
+  const handleSelectConversation = useCallback(async (conversationId: string) => {
+    setAssistantStreamStatsByMessageId({})
+    try {
+      const conv = await chatApi.getConversation(conversationId)
+      currentConversationIdRef.current = conversationId
+      applyConversation(conv)
+      restoreStreamingPreview(conversationId)
+      syncConversationRoute(conversationId)
+      setStreamError('')
+    } catch (err) {
+      console.error('Failed to load conversation:', err)
+      // B2：点开一个不存在/加载失败的 ghost——从乐观列表 + in-flight + 快照剔除，
+      // 清空当前会话并刷新侧栏，让 ghost 自动消失而不是卡住。
+      dropConversationLocally(conversationId)
+      if (currentConversationIdRef.current === conversationId) {
+        currentConversationIdRef.current = null
+        applyConversation(null)
+      }
+      forgetRememberedChatRoute()
+      syncConversationRoute(null)
+      refreshSidebar()
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '对话加载失败，已从列表移除')
+    }
+  }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
+
+  const handleNewConversation = useCallback(async () => {
+    setSelectedProject(null)
+    setSelectedSet(null)
+    setAssistantStreamStatsByMessageId({})
+    setDraftModel(activeModel)
+    setDraftKnowledgeBaseIds([])
+    setDraftForceKnowledgeSearch(false)
+    currentConversationIdRef.current = null
+    forgetRememberedChatRoute()
+    applyConversation(null)
+    restoreStreamingPreview(null)
+    syncConversationRoute(null)
+    setPendingUserMessage(null)
+    setPendingUserMessageConversationId(null)
+    setContextError('')
+    setContextLoading(false)
+    setContextCompressing(false)
+    setStreamError('')
+  }, [
+    activeModel,
+    applyConversation,
+    restoreStreamingPreview,
+    syncConversationRoute,
+  ])
+
+  const handleClearChat = useCallback(async () => {
+    const conversationId = currentConversationIdRef.current
+    if (conversationId && isConversationBusy(
+      conversationId,
+      inFlightConversationsRef.current,
+      streamSnapshotsRef.current,
+    )) {
+      setStreamErrorForConversation(conversationId, '请先停止当前回复，再清空对话。')
+      return
+    }
+
+    if (!conversationId) {
+      setAssistantStreamStatsByMessageId({})
+      setPendingUserMessage(null)
+      setPendingUserMessageConversationId(null)
+      setStreamError('')
+      return
+    }
+
+    if (!window.confirm('Clear this chat? This will delete the current conversation history.')) {
+      return
+    }
+
+    try {
+      await chatApi.deleteConversation(conversationId)
+      if (isConversationInFlight(inFlightConversationsRef.current, conversationId)) {
+        await chatApi.cancelStream(conversationId)
+      }
+      delete streamSnapshotsRef.current[conversationId]
+      delete pendingToolConfirmsRef.current[conversationId]
+      delete pendingSessionConsentsRef.current[conversationId]
+      delete streamErrorsRef.current[conversationId]
+      clearConversationInFlight(conversationId)
+      forgetRememberedChatRoute()
+      currentConversationIdRef.current = null
+      setAssistantStreamStatsByMessageId({})
+      setPendingUserMessage(null)
+      setPendingUserMessageConversationId(null)
+      setContextState(null)
+      setContextError('')
+      applyConversation(null)
+      restoreStreamingPreview(null)
+      syncConversationRoute(null)
+      refreshSidebar()
+      setStreamError('')
+    } catch (err) {
+      console.error('Failed to clear chat:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '清空对话失败')
+    }
+  }, [applyConversation, clearConversationInFlight, refreshSidebar, restoreStreamingPreview, setStreamErrorForConversation, syncConversationRoute])
+
+  const handleStartAssistantChat = useCallback(async (assistant: ChatAssistant) => {
+    setAssistantStreamStatsByMessageId({})
+    try {
+      const assistantProviderId = assistant.provider_id ?? assistant.providerId ?? ''
+      const assistantModel = assistant.model ?? ''
+      const conv = await chatApi.createConversation(
+        assistantProviderId || activeProviderId || undefined,
+        assistantModel || activeModel || undefined,
+        selectedProject?.name,
+        selectedProject?.id ?? null,
+        assistant.id,
+        selectedSet?.id ?? null,
+      )
+      currentConversationIdRef.current = conv.id
+      applyConversation(conv)
+      restoreStreamingPreview(conv.id)
+      syncConversationRoute(conv.id)
+      refreshSidebar()
+      setStreamError('')
+    } catch (err) {
+      console.error('Failed to start assistant conversation:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建助手对话失败')
+    }
+  }, [activeModel, activeProviderId, applyConversation, refreshSidebar, restoreStreamingPreview, selectedProject?.id, selectedProject?.name, selectedSet?.id, syncConversationRoute])
+
+  const handleStartBuilderChat = useCallback(async () => {
+    setAssistantStreamStatsByMessageId({})
+    try {
+      const conv = await chatApi.createBuilderConversation(
+        activeProviderId || undefined,
+        activeModel || undefined,
+        selectedProject?.id ?? null,
+      )
+      currentConversationIdRef.current = conv.id
+      applyConversation(conv)
+      restoreStreamingPreview(conv.id)
+      syncConversationRoute(conv.id)
+      refreshSidebar()
+      setStreamError('')
+    } catch (err) {
+      console.error('Failed to start builder conversation:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建搭建对话失败')
+    }
+  }, [activeModel, activeProviderId, applyConversation, refreshSidebar, restoreStreamingPreview, selectedProject?.id, syncConversationRoute])
+
+  const handleApplyAssistant = useCallback(async (assistantId: string | null) => {
+    if (!currentConversation) return
+    try {
+      const updated = await chatApi.updateConversation(currentConversation.id, {
+        assistantId: assistantId ?? '',
+      })
+      applyConversation(updated)
+      refreshSidebar()
+      if (assistantId) void refreshContextStats(updated.id)
+    } catch (err) {
+      console.error('Failed to update conversation assistant:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '助手切换失败')
+    }
+  }, [applyConversation, currentConversation, refreshContextStats, refreshSidebar])
+
+  const ensureConversationForAgentPlan = useCallback(async () => {
+    if (currentConversation) return currentConversation
+    const conversation = await chatApi.createConversation(
+      activeProviderId || undefined,
+      activeModel || undefined,
+      selectedProject?.name,
+      selectedProject?.id ?? null,
+      undefined,
+      selectedSet?.id ?? null,
+    )
+    currentConversationIdRef.current = conversation.id
+    applyConversation(conversation)
+    syncConversationRoute(conversation.id)
+    refreshSidebar()
+    return conversation
+  }, [activeModel, activeProviderId, applyConversation, currentConversation, refreshSidebar, selectedProject?.id, selectedProject?.name, selectedSet?.id, syncConversationRoute])
+
+  const handleAgentPlanModeChange = useCallback(async (mode: AgentPlanMode) => {
+    try {
+      const conversation = await ensureConversationForAgentPlan()
+      const updated = await chatApi.setAgentPlanMode(conversation.id, mode)
+      applyConversation(updated)
+      void refreshContextStats(updated.id)
+      refreshSidebar()
+    } catch (err) {
+      console.error('Failed to update agent plan mode:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || 'Plan 模式切换失败')
+    }
+  }, [applyConversation, ensureConversationForAgentPlan, refreshContextStats, refreshSidebar])
+
+  const runPiTaskCommand = useCallback(async (command: PiRpcCommand) => {
+    if (!currentConversation?.id) throw new Error('请先启动一个 Pi Task')
+    return chatApi.piRpcCommand(currentConversation.id, command)
+  }, [currentConversation?.id])
+
+  const handlePiCompact = useCallback(async () => {
+    try {
+      await runPiTaskCommand({ type: 'compact' })
+      if (currentConversation?.id) void refreshContextStats(currentConversation.id)
+    } catch (error) {
+      setStreamError(error instanceof Error ? error.message : String(error))
+    }
+  }, [currentConversation?.id, refreshContextStats, runPiTaskCommand])
+
+  const selectProjectNow = useCallback((project: ChatProject | null) => {
+    setSelectedProject(project)
+    setSelectedSet(null)
+    setAssistantStreamStatsByMessageId({})
+    setPendingUserMessage(null)
+    setPendingUserMessageConversationId(null)
+    currentConversationIdRef.current = null
+    applyConversation(null)
+    restoreStreamingPreview(null)
+    syncConversationRoute(null)
+    setStreamError('')
+  }, [applyConversation, restoreStreamingPreview, syncConversationRoute])
+
+  const handleSelectProject = useCallback(async (project: ChatProject | null) => {
+    const rootPath = project?.root_path ?? project?.rootPath ?? ''
+    if (!project || !rootPath.trim()) {
+      selectProjectNow(project)
+      return
+    }
+    try {
+      const preview = await chatApi.previewPiProjectTrust(rootPath)
+      if (preview.decision === 'trusted') {
+        selectProjectNow(project)
+        return
+      }
+      setProjectTrustError('')
+      setPendingProjectTrust({ project, preview })
+    } catch (err) {
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '无法检查项目信任状态')
+    }
+  }, [selectProjectNow])
+
+  const trustAndSelectProject = useCallback(async () => {
+    if (!pendingProjectTrust || savingProjectTrust) return
+    setSavingProjectTrust(true)
+    setProjectTrustError('')
+    try {
+      const rootPath = pendingProjectTrust.project.root_path ?? pendingProjectTrust.project.rootPath ?? ''
+      const preview = await chatApi.setPiProjectTrust(rootPath, true)
+      if (preview.decision !== 'trusted') throw new Error('项目信任保存后校验失败')
+      const project = pendingProjectTrust.project
+      setPendingProjectTrust(null)
+      selectProjectNow(project)
+    } catch (err) {
+      setProjectTrustError(typeof err === 'string' ? err : (err as Error).message || '无法保存项目信任')
+    } finally {
+      setSavingProjectTrust(false)
+    }
+  }, [pendingProjectTrust, savingProjectTrust, selectProjectNow])
+
+  const handleSelectSet = useCallback((set: ChatSet | null) => {
+    setSelectedSet(set)
+    setSelectedProject(null)
+    setAssistantStreamStatsByMessageId({})
+    setPendingUserMessage(null)
+    setPendingUserMessageConversationId(null)
+    currentConversationIdRef.current = null
+    applyConversation(null)
+    restoreStreamingPreview(null)
+    syncConversationRoute(null)
+    setStreamError('')
+  }, [applyConversation, restoreStreamingPreview, syncConversationRoute])
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (chatView === 'settings') return
+      const mod = e.metaKey || e.ctrlKey
+      if (!mod) return
+      if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault()
+        void handleNewConversation()
+      }
+      if (e.key === 'k' || e.key === 'K') {
+        e.preventDefault()
+        setSearchOpen((open) => !open)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [chatView, handleNewConversation])
+
+  const applyAssistantStreamStats = useCallback((updatedConv: Conversation) => {
+    const lastAssistant = [...updatedConv.messages]
+      .reverse()
+      .find((message) => message.role === 'assistant')
+    if (!lastAssistant || !streamStartedAtRef.current) return
+
+    const elapsedSec = Math.max((Date.now() - streamStartedAtRef.current) / 1000, 0.1)
+    const streamedText = `${streamingContentRef.current}${streamingReasoningRef.current ? `\n${streamingReasoningRef.current}` : ''}`
+    const tokenEstimate = estimateTokens(
+      streamedText.trim().length > 0
+        ? streamedText
+        : `${lastAssistant.content}${lastAssistant.reasoning ? `\n${lastAssistant.reasoning}` : ''}`,
+    )
+    const stats: AssistantStreamStats = {
+      messageId: lastAssistant.id,
+      tokensPerSec: tokenEstimate / elapsedSec,
+      reasoningDurationMs: streamSnapshotsRef.current[updatedConv.id]?.reasoningDurationMs ?? null,
+      reasoningDurationMsBySegmentId: streamSnapshotsRef.current[updatedConv.id]?.reasoningDurationMsBySegmentId ?? {},
+    }
+    setAssistantStreamStatsByMessageId((prev) => ({
+      ...prev,
+      [lastAssistant.id]: stats,
+    }))
+  }, [])
+
+  const handleSendMessage = useCallback(async (
+    content: string,
+    attachments: PendingAttachment[] = [],
+    options: SendMessageOptions = {},
+  ) => {
+    const trimmed = content.trim()
+    if (!trimmed && attachments.length === 0) return false
+    if (!options.forceNewConversation && sendDisabledReason) {
+      const targetId = currentConversationIdRef.current
+      if (targetId) {
+        setStreamErrorForConversation(targetId, sendDisabledReason)
+      } else {
+        setStreamError(sendDisabledReason)
+      }
+      return false
+    }
+
+    let conversation = options.conversationOverride
+      ?? (options.forceNewConversation ? null : currentConversation)
+    if (
+      conversation
+      && !options.conversationOverride
+      && isPlainBlankConversation(conversation)
+      && !conversationUsesModel(conversation, activeProviderId, activeModel)
+    ) {
+      conversation = null
+    }
+    if (!conversation) {
+      try {
+        conversation = await chatApi.createConversation(
+          activeProviderId || undefined,
+          activeModel || undefined,
+          selectedProject?.name,
+          selectedProject?.id ?? null,
+          undefined,
+          selectedSet?.id ?? null,
+        )
+        currentConversationIdRef.current = conversation.id
+        applyConversation(conversation)
+        syncConversationRoute(conversation.id)
+      } catch (err) {
+        console.error('Failed to create conversation before send:', err)
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建对话失败')
+        return false
+      }
+    }
+
+    // Apply the welcome-page knowledge-base draft to the freshly-created
+    // conversation (mounting on the welcome screen had no conversation yet).
+    {
+      const convKb = conversation.knowledge_base_ids ?? conversation.knowledgeBaseIds ?? []
+      const sameKb =
+        convKb.length === draftKnowledgeBaseIds.length &&
+        convKb.every((id) => draftKnowledgeBaseIds.includes(id))
+      if (draftKnowledgeBaseIds.length > 0 && !sameKb) {
+        try {
+          conversation = await chatApi.updateConversation(conversation.id, {
+            knowledgeBaseIds: draftKnowledgeBaseIds,
+          })
+          applyConversation(conversation)
+        } catch (err) {
+          console.error('Failed to apply knowledge base draft before send:', err)
+        }
+      }
+      // 同步「强制检索」草稿到新会话。
+      const convForce =
+        conversation.force_knowledge_search ?? conversation.forceKnowledgeSearch ?? false
+      if (draftForceKnowledgeSearch && !convForce) {
+        try {
+          conversation = await chatApi.updateConversation(conversation.id, {
+            forceKnowledgeSearch: true,
+          })
+          applyConversation(conversation)
+        } catch (err) {
+          console.error('Failed to apply force-knowledge-search draft before send:', err)
+        }
+      }
+    }
+
+    const conversationId = conversation.id
+    if (isConversationInFlight(inFlightConversationsRef.current, conversationId)) {
+      if (managedBeefApiRoute && attachments.length === 0 && trimmed) {
+        try {
+          await chatApi.piRpcCommand(conversationId, { type: 'steer', message: trimmed })
+          return true
+        } catch (error) {
+          setStreamErrorForConversation(
+            conversationId,
+            error instanceof Error ? error.message : String(error),
+          )
+          return false
+        }
+      }
+      setStreamErrorForConversation(conversationId, '该对话正在生成中，请稍后再试')
+      return false
+    }
+    setOptimisticSidebarConversations((items) => [
+      optimisticConversationListItem(conversation, trimmed),
+      ...items.filter((item) => item.id !== conversationId),
+    ])
+
+    const pendingUserId = `pending-user-${Date.now()}`
+    const optimisticUserMessage: ChatMessage = {
+      id: pendingUserId,
+      role: 'user',
+      content: trimmed,
+      attachments: attachments.map((attachment) => ({
+        id: attachment.id,
+        type: attachment.type,
+        name: attachment.name,
+        path: attachment.path,
+      })),
+      timestamp: Math.floor(Date.now() / 1000),
+    }
+
+    resetLocalCancellation()
+    const startedAt = Date.now()
+    const snapshot = ensureStreamSnapshot(conversationId)
+    snapshot.streaming = true
+    snapshot.content = ''
+    snapshot.reasoning = ''
+    snapshot.reasoningStreaming = false
+    snapshot.toolCalls = []
+    snapshot.segments = []
+    snapshot.startedAt = startedAt
+    snapshot.reasoningStartedAt = null
+    snapshot.reasoningDurationMs = null
+    snapshot.reasoningStartedAtBySegmentId = {}
+    snapshot.reasoningDurationMsBySegmentId = {}
+    snapshot.runId = null
+    syncGeneratingConversationIds()
+
+    if (currentConversationIdRef.current === conversationId) {
+      // 起新一轮：内容回空闲，coarse 置 streaming。
+      resetStreamStore()
+      setStreamCoarse({ streaming: true })
+      setStreamErrorForConversation(conversationId, '')
+      activeRunIdRef.current = null
+      streamStartedAtRef.current = startedAt
+      streamingContentRef.current = ''
+      streamingReasoningRef.current = ''
+      setPendingUserMessage(optimisticUserMessage)
+      setPendingUserMessageConversationId(conversationId)
+    }
+
+    markConversationInFlight(conversationId)
+    // 多模型一问多答（任务 06-30）：reply_models ≥2 且非 plan/orchestrate 模式时，后端会 fan-out
+    // 出 N 条并发流。前端据此建多答组（占位 N 列），流事件按 messageId 路由到对应列。
+    // 与后端 resolve_reply_arms 的判定保持一致（≤1 个臂 = 单模型路径，零回归）。
+    const replyArms = conversation.reply_models ?? conversation.replyModels ?? []
+    const convPlanMode =
+      conversation.agent_plan_state?.mode ?? conversation.agentPlanState?.mode ?? 'act'
+    const willFanOut = replyArms.length >= 2 && convPlanMode === 'act'
+    if (willFanOut) {
+      const groupId = `grp-local-${Date.now()}`
+      beginGroup(
+        conversationId,
+        groupId,
+        replyArms.map((ref) => ({ providerId: ref.provider_id, model: ref.model })),
+      )
+      // 多答组不走单流预览：清掉刚才置的会话级 streaming 占位，避免顶部多出一条空预览气泡。
+      if (currentConversationIdRef.current === conversationId) {
+        resetStreamStore()
+        setStreamCoarse({ streaming: true })
+      }
+    }
+    const attachmentSkillId = options.forceNewConversation
+      ? inferSingleAttachmentSkillId(attachments, enabledSkills)
+      : effectiveSkillId ?? inferSingleAttachmentSkillId(attachments, enabledSkills)
+
+    let persistedConversation: Conversation | null = null
+    try {
+      const updatedConv = await chatApi.sendMessage(
+        conversationId,
+        trimmed,
+        attachments,
+        attachmentSkillId,
+      )
+      persistedConversation = updatedConv
+      if (currentConversationIdRef.current === conversationId) {
+        applyAssistantStreamStats(updatedConv)
+        setPendingUserMessage(null)
+        setPendingUserMessageConversationId(null)
+        setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
+        applyConversation(updatedConv)
+        refreshSidebar()
+        if (!locallyCancelledConversationIdRef.current) {
+          resetLocalCancellation()
+        }
+      } else {
+        refreshSidebar()
+      }
+    } catch (err) {
+      console.error('Failed to send message:', err)
+      // 后端生成失败时保留了用户消息并随错误带回对话——套用它，让问题留在线程里可重试，
+      // 而不是连问题一起消失（旧行为）。
+      const keptConversation = (err as { conversation?: Conversation })?.conversation
+      if (currentConversationIdRef.current === conversationId) {
+        setPendingUserMessage(null)
+        setPendingUserMessageConversationId(null)
+        if (keptConversation) {
+          applyConversation(keptConversation)
+        }
+      }
+      setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
+      clearStreamSnapshot(conversationId)
+      if (keptConversation) refreshSidebar()
+      const message = typeof err === 'string' ? err : (err as Error).message || '发送失败'
+      setStreamErrorForConversation(conversationId, message)
+    } finally {
+      clearConversationInFlight(conversationId)
+      // 多答组收尾：sendMessage 返回时所有臂已结束，持久化后的会话已 applyConversation（含 N 条
+      // 带 group_id 的 assistant 消息），实时流列已可丢弃，由 MessageGroup 渲染落库后的列。
+      endGroup(conversationId)
+      if (persistedConversation) {
+        // invoke 已返回持久化后的完整对话且上面已 applyConversation。
+        // 丢弃被延后的 finishStreamingRun(它会再次全量 reloadConversation),避免每轮随历史线性变慢。
+        delete pendingStreamDoneRef.current[conversationId]
+        finishStreamingRunWithConversation(conversationId, persistedConversation)
+      } else if (!(await flushPendingStreamDone(conversationId))) {
+        clearStreamSnapshot(conversationId)
+      }
+    }
+    return true
+  }, [
+    activeModel,
+    activeProviderId,
+    applyAssistantStreamStats,
+    applyConversation,
+    clearConversationInFlight,
+    clearStreamSnapshot,
+    currentConversation,
+    managedBeefApiRoute,
+    draftKnowledgeBaseIds,
+    draftForceKnowledgeSearch,
+    effectiveSkillId,
+    enabledSkills,
+    ensureStreamSnapshot,
+    finishStreamingRunWithConversation,
+    flushPendingStreamDone,
+    markConversationInFlight,
+    refreshSidebar,
+    resetLocalCancellation,
+    selectedProject?.id,
+    selectedProject?.name,
+    selectedSet?.id,
+    sendDisabledReason,
+    setStreamErrorForConversation,
+    syncConversationRoute,
+    syncGeneratingConversationIds,
+  ])
+
+  // 用 ref 持有最新 handleSendMessage，使下方的 drainExternalSends 保持稳定身份，
+  // 避免其依赖抖动导致订阅 effect 反复 cleanup/重订阅（重订阅缝隙会丢掉外部发送事件）。
+  const handleSendMessageRef = useRef(handleSendMessage)
+  handleSendMessageRef.current = handleSendMessage
+
+  // 历史预置（Lens「在 AI 客户端继续」交接）：用最新 reactive 值（provider/model/project）创建带历史的新会话。
+  // 同 handleSendMessageRef 思路用 ref 持有，保持 drainExternalSends 稳定身份。
+  const importExternalConversation = useCallback(async (
+    messages: { role: string; content: string }[],
+    attachmentPaths: string[],
+  ): Promise<boolean> => {
+    try {
+      const conversation = await chatApi.importExternalConversation(
+        messages,
+        attachmentPaths,
+        activeProviderId || undefined,
+        activeModel || undefined,
+        selectedProject?.id ?? null,
+      )
+      currentConversationIdRef.current = conversation.id
+      applyConversation(conversation)
+      syncConversationRoute(conversation.id)
+      refreshSidebar()
+      return true
+    } catch (err) {
+      console.error('Failed to import external conversation:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '导入对话失败')
+      return false
+    }
+  }, [activeModel, activeProviderId, applyConversation, refreshSidebar, selectedProject?.id, syncConversationRoute])
+  const importExternalConversationRef = useRef(importExternalConversation)
+  importExternalConversationRef.current = importExternalConversation
+
+  const handleExecuteAgentPlan = useCallback(async (messageId: string) => {
+    const conversation = currentConversation
+    if (!conversation) return
+    const planMessage = conversation.messages.find((message) => message.id === messageId)
+    const messagePlan = planMessage?.agent_plan ?? planMessage?.agentPlan ?? null
+    const messagePlanText = messagePlan?.plan?.trim() ?? ''
+    const legacyPlan = conversation.agent_plan_state ?? conversation.agentPlanState ?? null
+    const legacyPlanText = legacyPlan?.plan?.trim() ?? ''
+    const isLegacyPlanMessage = Boolean(
+      planMessage
+      && !isExecutableAgentPlanText(messagePlanText)
+      && isExecutableAgentPlanText(legacyPlanText)
+      && planMessage.role === 'assistant'
+      && planMessage.content.trim() === legacyPlanText,
+    )
+    const planText = isExecutableAgentPlanText(messagePlanText)
+      ? messagePlanText
+      : (isLegacyPlanMessage ? legacyPlanText : '')
+    if (!isExecutableAgentPlanText(planText)) return
+    if (isConversationInFlight(inFlightConversationsRef.current, conversation.id)) {
+      setStreamErrorForConversation(conversation.id, '该对话正在生成中，请稍后再试')
+      return
+    }
+
+    try {
+      const updated = await chatApi.executeAgentPlan(
+        conversation.id,
+        isExecutableAgentPlanText(messagePlanText) ? messageId : undefined,
+      )
+      applyConversation(updated)
+      refreshSidebar()
+      void refreshContextStats(updated.id)
+      void handleSendMessage('按这条计划开始执行。', [], { conversationOverride: updated })
+    } catch (err) {
+      console.error('Failed to execute agent plan:', err)
+      setStreamErrorForConversation(
+        conversation.id,
+        typeof err === 'string' ? err : (err as Error).message || '执行计划失败',
+      )
+    }
+  }, [
+    applyConversation,
+    currentConversation,
+    handleSendMessage,
+    refreshContextStats,
+    refreshSidebar,
+    setStreamErrorForConversation,
+  ])
+
+  const drainExternalSends = useCallback(async () => {
+    if (externalSendDrainProcessingRef.current) {
+      externalSendDrainRequestedRef.current = true
+      return
+    }
+
+    externalSendDrainProcessingRef.current = true
+    try {
+      do {
+        externalSendDrainRequestedRef.current = false
+
+        const result = await api.chatTakeExternalSends()
+        if (!result.success) {
+          const error = 'error' in result && typeof result.error === 'string'
+            ? result.error
+            : ''
+          throw new Error(error || 'Failed to take external Chat messages')
+        }
+        const requests = result.requests ?? []
+        if (requests.length > 0) {
+          externalSendQueueRef.current.push(...requests)
+        }
+
+        const request = externalSendQueueRef.current[0]
+        if (!request) continue
+        setChatView('conversation')
+        const attachmentPaths = (request.attachments ?? [])
+          .map((attachment) => attachment.path)
+          .filter((path): path is string => !!path)
+
+        // 历史预置分支：把 Lens 完整多轮历史 + 截图搬成一个新会话（不发消息、不触发回复），落地末尾可续聊。
+        if (request.messages && request.messages.length > 0) {
+          await importExternalConversationRef.current(request.messages, attachmentPaths)
+          externalSendQueueRef.current.shift()
+          continue
+        }
+
+        const attachments = (request.attachments ?? [])
+          .filter((attachment) => attachment.path)
+          .map<PendingAttachment>((attachment, index) => ({
+            id: attachment.id || `external-${request.id}-${index}`,
+            type: attachment.type === 'file' ? 'file' : 'image',
+            name: attachment.name || (attachment.type === 'file' ? 'Attachment' : 'Image'),
+            path: attachment.path,
+          }))
+        const accepted = await handleSendMessageRef.current(
+          request.content ?? '',
+          attachments,
+          { forceNewConversation: true },
+        )
+        if (accepted) {
+          externalSendQueueRef.current.shift()
+        } else {
+          externalSendDrainRequestedRef.current = true
+          break
+        }
+      } while (externalSendDrainRequestedRef.current || externalSendQueueRef.current.length > 0)
+    } catch (err) {
+      console.error('Failed to process external Chat message:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '外部消息发送失败')
+    } finally {
+      externalSendDrainProcessingRef.current = false
+      if (externalSendDrainRequestedRef.current) {
+        window.setTimeout(() => {
+          void drainExternalSends()
+        }, 0)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const disposers: Array<() => void> = []
+    const register = (p: Promise<() => void>) => {
+      p.then((dispose) => {
+        if (cancelled) dispose()
+        else disposers.push(dispose)
+      }).catch((err) => console.error(err))
+    }
+
+    // 外部发送（如 Lens 交接）的投递不依赖某个一次性事件的时序：
+    // 任意可靠时机都主动从后端取走 pending（chat_take_external_sends 幂等，取空即 no-op）。
+    void drainExternalSends()
+    // 1) 后端就绪事件
+    register(api.onChatExternalSendReady(() => {
+      if (!cancelled) void drainExternalSends()
+    }))
+    // 2) 窗口获得焦点 —— 覆盖复用窗口被重新唤起、以及冷启动时就绪事件丢失的情况
+    register(
+      import('@tauri-apps/api/window')
+        .then(({ getCurrentWindow }) =>
+          getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+            if (!cancelled && focused) void drainExternalSends()
+          }),
+        ),
+    )
+
+    return () => {
+      cancelled = true
+      disposers.forEach((dispose) => dispose())
+    }
+  }, [drainExternalSends])
+
+  useEffect(() => {
+    if (!streamCoarse.streaming && externalSendDrainRequestedRef.current) {
+      void drainExternalSends()
+    }
+  }, [drainExternalSends, streamCoarse.streaming])
+
+  const handleUpdateMessage = useCallback(
+    async (messageId: string, content: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+      try {
+        const updated = await chatApi.updateMessage(conv.id, messageId, content)
+        applyConversation(updated)
+        refreshSidebar()
+      } catch (err) {
+        console.error('Failed to update message:', err)
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '保存失败')
+      }
+    },
+    [applyConversation, refreshSidebar],
+  )
+
+  const handleDeleteMessage = useCallback(
+    async (messageId: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+      if (!window.confirm('确定删除这条消息吗？')) return
+      try {
+        const updated = await chatApi.deleteMessage(conv.id, messageId)
+        applyConversation(updated)
+        setAssistantStreamStatsByMessageId((prev) => {
+          const next = { ...prev }
+          delete next[messageId]
+          return next
+        })
+        refreshSidebar()
+      } catch (err) {
+        console.error('Failed to delete message:', err)
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '删除失败')
+      }
+    },
+    [applyConversation, refreshSidebar],
+  )
+
+  // 对话分支（方案 B）：在某条消息处建分支——把该消息及之前的消息复制进新对话，
+  // 立即打开新对话（不自动发送）。源对话只读、不受影响。
+  const handleForkMessage = useCallback(
+    async (messageId: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+      try {
+        const forked = await chatApi.forkConversation(conv.id, messageId)
+        setAssistantStreamStatsByMessageId({})
+        currentConversationIdRef.current = forked.id
+        applyConversation(forked)
+        restoreStreamingPreview(forked.id)
+        syncConversationRoute(forked.id)
+        setStreamError('')
+        refreshSidebar()
+      } catch (err) {
+        console.error('Failed to fork conversation:', err)
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '建分支失败')
+      }
+    },
+    [applyConversation, refreshSidebar, restoreStreamingPreview, syncConversationRoute],
+  )
+
+  // 多答组「选中条」（任务 06-30 / D5）：标记某组进下一轮历史的列。默认第一列；用户点选改。
+  const handleSetGroupSelection = useCallback(
+    async (groupId: string, messageId: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+      try {
+        const updated = await chatApi.setGroupSelection(conv.id, groupId, messageId)
+        applyConversationMeta(updated)
+      } catch (err) {
+        console.error('Failed to set group selection:', err)
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '选中失败')
+      }
+    },
+    [applyConversationMeta],
+  )
+
+  const handleRegenerateMessage = useCallback(
+    async (messageId: string, newContent?: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+
+      const conversationId = conv.id
+      // Busy 拒绝（AC3）：入口已在 MessageList 按 streaming/frozen 收起，这里是兜底。
+      // 带编辑内容时静默 return 会无声丢掉用户改的文字，必须给出提示（与 handleSend 同文案）。
+      if (isConversationInFlight(inFlightConversationsRef.current, conversationId)) {
+        setStreamErrorForConversation(conversationId, '该对话正在生成中，请稍后再试')
+        return
+      }
+
+      const messageIndex = conv.messages.findIndex(
+        (message) => message.id === messageId,
+      )
+      if (messageIndex < 0) return
+
+      // 助手消息：截到它之前重生成。用户消息：保留它（编辑时先替换内容）、只丢其后内容再重试。
+      const keepTarget = conv.messages[messageIndex].role === 'user'
+      const cutFrom = keepTarget ? messageIndex + 1 : messageIndex
+      // 空白-only 的编辑内容按「未编辑」处理（纯重生成）：绝不能把 Some("") 发给后端——
+      // 乐观截断已经执行，后端再报「消息内容不能为空」会留下截断了却没重生成的线程。
+      const trimmedNewContent = newContent?.trim() || undefined
+      const keptMessages = conv.messages.slice(0, cutFrom)
+      if (keepTarget && trimmedNewContent) {
+        keptMessages[messageIndex] = {
+          ...keptMessages[messageIndex],
+          content: trimmedNewContent,
+        }
+      }
+      applyConversation({
+        ...conv,
+        messages: keptMessages,
+      })
+      const removedMessageIds = new Set(
+        conv.messages.slice(cutFrom).map((message) => message.id),
+      )
+      setAssistantStreamStatsByMessageId((prev) => Object.fromEntries(
+        Object.entries(prev).filter(([id]) => !removedMessageIds.has(id)),
+      ))
+      resetLocalCancellation()
+      const startedAt = Date.now()
+      const snapshot = ensureStreamSnapshot(conversationId)
+      snapshot.streaming = true
+      snapshot.content = ''
+      snapshot.reasoning = ''
+      snapshot.reasoningStreaming = false
+      snapshot.toolCalls = []
+      snapshot.segments = []
+      snapshot.startedAt = startedAt
+      snapshot.reasoningStartedAt = null
+      snapshot.reasoningDurationMs = null
+      snapshot.reasoningStartedAtBySegmentId = {}
+      snapshot.reasoningDurationMsBySegmentId = {}
+      snapshot.runId = null
+      syncGeneratingConversationIds()
+
+      if (currentConversationIdRef.current === conversationId) {
+        // 起新一轮：内容回空闲，coarse 置 streaming。
+        resetStreamStore()
+        setStreamCoarse({ streaming: true })
+        setStreamErrorForConversation(conversationId, '')
+        activeRunIdRef.current = null
+        streamStartedAtRef.current = startedAt
+        streamingContentRef.current = ''
+        streamingReasoningRef.current = ''
+      }
+
+      markConversationInFlight(conversationId)
+      let persistedConversation: Conversation | null = null
+      try {
+        const updated = await chatApi.regenerateMessage(conversationId, messageId, trimmedNewContent)
+        persistedConversation = updated
+        if (currentConversationIdRef.current === conversationId) {
+          applyAssistantStreamStats(updated)
+          applyConversation(updated)
+          refreshSidebar()
+        } else {
+          refreshSidebar()
+        }
+      } catch (err) {
+        console.error('Failed to regenerate message:', err)
+        setStreamErrorForConversation(
+          conversationId,
+          typeof err === 'string' ? err : (err as Error).message || '重新生成失败',
+        )
+        clearStreamSnapshot(conversationId)
+        if (currentConversationIdRef.current === conversationId) {
+          void reloadConversation(conversationId)
+        }
+      } finally {
+        clearConversationInFlight(conversationId)
+        if (persistedConversation) {
+          // 同 handleSend:已有持久化对话,丢弃延后的全量重拉,直接套用。
+          delete pendingStreamDoneRef.current[conversationId]
+          finishStreamingRunWithConversation(conversationId, persistedConversation)
+        } else if (!(await flushPendingStreamDone(conversationId))) {
+          clearStreamSnapshot(conversationId)
+        }
+      }
+    },
+    [applyAssistantStreamStats, applyConversation, clearConversationInFlight, clearStreamSnapshot, ensureStreamSnapshot, finishStreamingRunWithConversation, flushPendingStreamDone, markConversationInFlight, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+  )
+
+  const handleModelChange = useCallback(async (providerId: string, model: string) => {
+    setDraftModel(model)
+
+    if (!currentConversation) return
+
+    try {
+      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+        providerId,
+        model,
+      })
+      applyConversationMeta(updatedConv)
+    } catch (err) {
+      console.error('Failed to change model:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '模型切换失败')
+    }
+  }, [applyConversationMeta, currentConversation])
+
+  const handleToggleForceKnowledgeSearch = useCallback(async () => {
+    const next = !(currentConversation
+      ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false)
+      : draftForceKnowledgeSearch)
+    setDraftForceKnowledgeSearch(next)
+    if (!currentConversation) return
+    try {
+      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+        forceKnowledgeSearch: next,
+      })
+      applyConversationMeta(updatedConv)
+    } catch (err) {
+      console.error('Failed to update force knowledge search:', err)
+    }
+  }, [applyConversationMeta, currentConversation, draftForceKnowledgeSearch])
+
+  const handleCancelStream = useCallback(async () => {
+    const conversationId = currentConversationIdRef.current
+    if (
+      !conversationId
+      || getStreamCoarse().cancelling
+      || !isConversationBusy(
+        conversationId,
+        inFlightConversationsRef.current,
+        streamSnapshotsRef.current,
+      )
+    ) {
+      return
+    }
+
+    setStreamCoarse({ cancelling: true })
+    cancelCurrentRunLocally()
+    try {
+      await chatApi.cancelStream(conversationId)
+    } catch (err) {
+      console.error('Failed to cancel chat stream:', err)
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '停止生成失败',
+      )
+    } finally {
+      setStreamCoarse({ cancelling: false })
+    }
+  }, [cancelCurrentRunLocally, setStreamErrorForConversation])
+
+  const displayMessages = useMemo(() => {
+    const stored = currentConversation?.messages ?? []
+    if (!pendingUserMessage || pendingUserMessageConversationId !== currentConversation?.id) return stored
+    const alreadyStored = stored.some(
+      (message) =>
+        message.id === pendingUserMessage.id ||
+        (message.role === 'user' &&
+          message.content === pendingUserMessage.content &&
+          message.timestamp >= pendingUserMessage.timestamp - 2),
+    )
+    return alreadyStored ? stored : [...stored, pendingUserMessage]
+  }, [currentConversation?.id, currentConversation?.messages, pendingUserMessage, pendingUserMessageConversationId])
+
+  const hasMessages = displayMessages.length > 0
+  const showEmptyHero = chatView === 'conversation' && !hasMessages && !streamCoarse.streaming && !streamCoarse.streamError
+  const taskStatus = resolveTaskStatus({
+    awaitingApproval: isCurrentConversationAwaitingApproval(
+      pendingToolConfirm?.conversationId,
+      currentConversation?.id,
+    ),
+    running: currentConversation ? generatingConversationIds.has(currentConversation.id) : false,
+    failed: Boolean(streamCoarse.streamError),
+    persisted: currentConversation
+      ? (currentConversation.last_run_status ?? currentConversation.lastRunStatus ?? null) as ChatTaskStatus | null
+      : null,
+  })
+  const setSidebarCollapsedPersisted = useCallback((collapsed: boolean) => {
+    setSidebarCollapsed(collapsed)
+    rememberChatSidebarCollapsed(collapsed)
+  }, [])
+
+  const handleCollapseSidebar = useCallback(() => {
+    setSidebarCollapsedPersisted(true)
+  }, [setSidebarCollapsedPersisted])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let cancelled = false
+
+    void (async () => {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window')
+      const { LogicalSize } = await import('@tauri-apps/api/dpi')
+      const min = sidebarCollapsed ? CHAT_MIN_SIZE_COLLAPSED : CHAT_MIN_SIZE_EXPANDED
+      const win = getCurrentWindow()
+      // 最大化/全屏时不要动 min-size 或 size：Windows 上 setMinSize 会触发重排、把最大化状态取消掉
+      // （表现为切换侧边栏后窗口退出最大化）。尺寸约束对铺满屏幕的窗口也没意义，等恢复到可调窗口再应用。
+      if ((await win.isMaximized()) || (await win.isFullscreen())) return
+      if (cancelled) return
+      await win.setMinSize(new LogicalSize(min.width, min.height))
+      if (cancelled) return
+
+      if (!sidebarCollapsed) {
+        const scaleFactor = await win.scaleFactor()
+        const size = await win.innerSize()
+        const logical = size.toLogical(scaleFactor)
+        if (logical.width < min.width) {
+          const nextHeight = Math.max(logical.height, min.height)
+          await win.setSize(new LogicalSize(min.width, nextHeight))
+          rememberChatSize(min.width, nextHeight)
+        }
+      }
+    })().catch((err) => {
+      console.error('[Chat] Failed to update window min size:', err)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [sidebarCollapsed])
+
+  const handleSidebarSelectProject = useCallback((project: ChatProject | null) => {
+    runAfterLeavingSettings(() => void handleSelectProject(project))
+  }, [handleSelectProject, runAfterLeavingSettings])
+
+  const handleSidebarSelectSet = useCallback((set: ChatSet | null) => {
+    runAfterLeavingSettings(() => handleSelectSet(set))
+  }, [handleSelectSet, runAfterLeavingSettings])
+
+  const handleSidebarSelectConversation = useCallback((id: string) => {
+    runAfterLeavingSettings(() => void handleSelectConversation(id))
+  }, [handleSelectConversation, runAfterLeavingSettings])
+
+  const handleSidebarNewConversation = useCallback(() => {
+    runAfterLeavingSettings(() => void handleNewConversation())
+  }, [handleNewConversation, runAfterLeavingSettings])
+
+  const handleSidebarConversationDeleted = useCallback(() => {
+    forgetRememberedChatRoute()
+    applyConversation(null)
+    syncConversationRoute(null)
+    refreshSidebar()
+  }, [applyConversation, refreshSidebar, syncConversationRoute])
+
+  const handleSidebarForceDropConversation = useCallback((id: string) => {
+    // B3：侧栏删除时强制清掉该会话的 in-flight/快照/乐观项，
+    // 使乐观合并不再保留它（删"generating"会话也能立即从侧栏消失）。
+    dropConversationLocally(id)
+  }, [dropConversationLocally])
+
+  const handleSidebarOpenSettings = useCallback(() => {
+    const settingsPanelOpen = chatView === 'settings' && extensionsNavItem === null
+    if (settingsPanelOpen) {
+      if (settingsRef.current) {
+        settingsRef.current.requestClose()
+      } else {
+        handleSettingsClose()
+      }
+      return
+    }
+    setExtensionsNavItem(null)
+    openEmbeddedSettings('chat')
+  }, [chatView, extensionsNavItem, handleSettingsClose, openEmbeddedSettings])
+
+  const handleSidebarSearchOpenChange = useCallback((open: boolean) => {
+    if (open) {
+      runAfterLeavingSettings(() => setSearchOpen(true))
+      return
+    }
+    setSearchOpen(false)
+  }, [runAfterLeavingSettings])
+
+  return (
+    <div
+      className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
+    >
+      {!usesNativeTitlebar && <WindowControls />}
+      <div className="flex h-full min-h-0 w-full">
+        {chatView !== 'onboarding' ? (
+        <Sidebar
+          lang={uiLang}
+          currentConversationId={currentConversation?.id}
+          generatingConversationIds={generatingConversationIds}
+          optimisticConversations={optimisticSidebarConversations}
+          selectedProject={selectedProject}
+          onSelectProject={handleSidebarSelectProject}
+          selectedSet={selectedSet}
+          onSelectSet={handleSidebarSelectSet}
+          onSelectConversation={handleSidebarSelectConversation}
+          onNewConversation={handleSidebarNewConversation}
+          onConversationDeleted={handleSidebarConversationDeleted}
+          onForceDropConversation={handleSidebarForceDropConversation}
+          onOpenExtensionsItem={openExtensionsItem}
+          onOpenSettings={handleSidebarOpenSettings}
+          settingsActive={chatView === 'settings' && extensionsNavItem === null}
+          extensionsActive={extensionsActive}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={handleCollapseSidebar}
+          refreshKey={sidebarRefreshKey}
+          profileRefreshKey={sidebarProfileRefreshKey}
+          searchOpen={searchOpen}
+          onSearchOpenChange={handleSidebarSearchOpenChange}
+        />
+        ) : null}
+
+        {chatView === 'onboarding' ? (
+          <div className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col">
+            <OnboardingShell
+              onComplete={handleOnboardingExit}
+              onSettingsChange={onSettingsChange}
+            />
+          </div>
+        ) : chatView === 'settings' ? (
+          <div className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col">
+            <Suspense fallback={<ChatPaneLoading />}>
+              <SettingsShell
+                ref={settingsRef}
+                variant="embedded"
+                initialTab={settingsInitialTab}
+                hideNav={extensionsNavItem === 'knowledge'}
+                reserveTrafficLightSpace={sidebarCollapsed && usesNativeTitlebar}
+                onClose={handleSettingsClose}
+                onSettingsChange={handleSettingsChange}
+                onReady={emitContentReady}
+              />
+            </Suspense>
+          </div>
+        ) : chatView === 'assistants' ? (
+          <div className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col">
+            <Suspense fallback={<ChatPaneLoading />}>
+              <AssistantCenter
+                skills={enabledSkills}
+                currentAssistantId={currentAssistantId}
+                onStartAssistantChat={(assistant) => void handleStartAssistantChat(assistant)}
+                onStartBuilder={() => void handleStartBuilderChat()}
+                onApplyAssistant={currentConversation ? (assistantId) => void handleApplyAssistant(assistantId) : undefined}
+                onClose={handleAssistantCenterClose}
+              />
+            </Suspense>
+          </div>
+        ) : chatView === 'skill' ? (
+          <div className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col">
+            <Suspense fallback={<ChatPaneLoading />}>
+              <SkillCenter
+                onClose={handleSkillCenterClose}
+                onSkillsChanged={() => void loadSkills()}
+              />
+            </Suspense>
+          </div>
+        ) : (
+          <div className="chat-main-pane relative flex min-w-0 flex-1 flex-col">
+            {/* 图片查看器为浮层(见下方 overlay),不替换主面板 —— 否则会卸载 InputBar,
+                丢掉待发送附件 / 草稿。here 起正常内容,始终挂载。 */}
+            <>
+                <header
+              className={`chat-titlebar-row ${chatTitlebarRowClass} min-w-0 gap-2 ${
+                sidebarCollapsed && usesNativeTitlebar
+                  ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac`
+                  : 'px-6'
+              } ${sidebarCollapsed ? 'pr-3' : ''} ${!usesNativeTitlebar ? 'chat-win-titlebar-safe' : ''}`}
+              data-tauri-drag-region
+            >
+              {sidebarCollapsed && (
+                <ChatTitlebarActions
+                  sidebarExpanded={false}
+                  onToggleSidebar={() => setSidebarCollapsedPersisted(false)}
+                  onNewConversation={() => {
+                    runAfterLeavingSettings(() => void handleNewConversation())
+                  }}
+                />
+              )}
+              <div className="flex min-w-0 items-center gap-1">
+                <ManagedModelSelector
+                  models={managedAllowedModels}
+                  value={activeModel}
+                  onChange={(model) => void handleModelChange('beefapi-managed', model)}
+                />
+                <div className="shrink-0" data-tauri-drag-region="false">
+                  <BackgroundJobsIndicator />
+                </div>
+                {currentConversation?.id && (
+                  <div className="flex shrink-0 items-center gap-2" data-tauri-drag-region="false">
+                    {piRuntimeStatus && (
+                      <span className="max-w-28 truncate text-[11px] text-neutral-500 dark:text-neutral-400">
+                        {piRuntimeStatus}
+                      </span>
+                    )}
+                    <PiTaskMenu onRun={runPiTaskCommand} />
+                  </div>
+                )}
+              </div>
+              <div className="min-w-5 flex-1" data-tauri-drag-region />
+              <div className="flex min-w-0 shrink items-center justify-end gap-1">
+                <TaskStatusBadge status={taskStatus} lang={uiLang === 'en' ? 'en' : 'zh'} />
+                <AgentTodoIndicator todoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null} />
+              </div>
+                </header>
+
+                <div className="flex min-h-0 flex-1 flex-col">
+                  {showEmptyHero ? (
+                    <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-6 pb-12">
+                  <div className="chat-empty-hero-stack chat-motion-fade-up relative z-10 w-full max-w-3xl space-y-5">
+                    <div className="text-center">
+                      <span className="beef-eyebrow">
+                        {uiLang === 'en' ? 'NEW CODING TASK' : '新建 CODING TASK'}
+                      </span>
+                    <h2
+                      className="chat-empty-hero-title mt-2 text-center text-[1.25rem] font-semibold leading-snug tracking-[-0.012em] text-neutral-900 dark:text-[#FFEEDA] sm:text-[1.4rem]"
+                    >
+                      {currentAssistantSnapshot?.name
+                        || selectedProject?.name
+                        || (uiLang === 'en' ? 'Open a project and describe the change' : '打开项目，然后描述要修改的内容')}
+                    </h2>
+                      <p className="mx-auto mt-2 max-w-xl text-[12px] leading-6 text-neutral-500 dark:text-[#FFEEDA]/55">
+                        {selectedProject
+                          ? (uiLang === 'en'
+                              ? 'Beefex will plan, edit, run checks, and ask before each risky action.'
+                              : 'Beefex 会规划、修改并运行检查，每个风险动作都会先向你确认。')
+                          : (uiLang === 'en'
+                              ? 'Choose an existing folder or create a blank project from the composer.'
+                              : '从输入栏选择现有文件夹，或创建一个空白项目。')}
+                      </p>
+                    </div>
+                    <InputBar
+                      layout="inline"
+                      onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                      disabled={isCurrentConversationBusy()}
+                      onCancel={() => void handleCancelStream()}
+                      cancelVisible={streamCoarse.streaming}
+                      cancelling={streamCoarse.cancelling}
+                      onOpenSettings={() => openEmbeddedSettings('chat')}
+                      onOpenTools={undefined}
+                      onNewChat={() => void handleNewConversation()}
+                      onCompactContext={() => void handlePiCompact()}
+                      onClearChat={() => void handleClearChat()}
+                      enabledTools={enabledTools}
+                      toolsDisabledReason={toolsDisabledReason}
+                      toolStatusHint={toolStatusHint}
+                      sendDisabledReason={sendDisabledReason}
+                      agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
+                      onAgentPlanModeChange={handleAgentPlanModeChange}
+                      enabledSkills={[]}
+                      onOpenSkillSettings={undefined}
+                      selectedProject={selectedProject}
+                      conversationProject={conversationProject}
+                      onSelectProject={handleSidebarSelectProject}
+                      showProjectEntry
+                      currentAssistant={null}
+                      onOpenAssistantCenter={undefined}
+                      onSelectAssistant={undefined}
+                      autoFocus
+                      usesExternalRuntime={false}
+                      externalAgentName={null}
+                      conversationId={currentConversation?.id ?? null}
+                      knowledgeBaseIds={currentConversation ? (currentConversation.knowledge_base_ids ?? currentConversation.knowledgeBaseIds ?? []) : draftKnowledgeBaseIds}
+                      onChangeKnowledgeBaseIds={undefined}
+                      forceKnowledgeSearch={currentConversation ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false) : draftForceKnowledgeSearch}
+                      onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
+                      mcpServers={mcpServers}
+                      onToggleMcpServer={handleToggleMcpServer}
+                      webSearchEnabled={webSearchEnabled}
+                      onToggleWebSearch={handleToggleWebSearch}
+                      replyModels={activeReplyModels}
+                      onChangeReplyModels={undefined}
+                      contextSlot={
+                        <ContextIndicator
+                          contextState={contextState}
+                          messageCount={displayMessages.length}
+                          loading={contextLoading}
+                          compressing={contextCompressing}
+                          error={contextError}
+                          usesExternalRuntime={false}
+                          onRefresh={handleRefreshContext}
+                          onCompress={() => void handleCompressContext()}
+                          lang={uiLang}
+                        />
+                      }
+                    />
+                  </div>
+                </div>
+                  ) : (
+                    <>
+                  {(() => {
+                    const origin = currentConversation?.forked_from ?? currentConversation?.forkedFrom
+                    if (!origin) return null
+                    const sourceId = origin.conversation_id ?? origin.conversationId
+                    if (!sourceId) return null
+                    return (
+                      <div className="flex justify-center px-4 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleSelectConversation(sourceId)}
+                          className="inline-flex max-w-full items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-1 text-[11px] text-neutral-500 transition-colors hover:bg-neutral-200 hover:text-neutral-700 dark:bg-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-neutral-200"
+                          title={`分叉自「${origin.title}」，点击回到源对话`}
+                        >
+                          <GitBranch size={12} strokeWidth={2} className="shrink-0" />
+                          <span className="truncate">分叉自 {origin.title}</span>
+                        </button>
+                      </div>
+                    )
+                  })()}
+                  <Suspense fallback={<MessageListLoading />}>
+                    <MessageList
+                      key={currentConversation?.id ?? 'empty'}
+                      conversationId={currentConversation?.id}
+                      messages={displayMessages}
+                      agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
+                      assistantStreamStatsByMessageId={assistantStreamStatsByMessageId}
+                      onUpdateMessage={handleUpdateMessage}
+                      onRegenerateMessage={handleRegenerateMessage}
+                      onForkMessage={handleForkMessage}
+                      onDeleteMessage={handleDeleteMessage}
+                      onRetryLastUser={handleRegenerateMessage}
+                      onExecuteAgentPlan={handleExecuteAgentPlan}
+                      groupSelections={currentConversation?.group_selections ?? currentConversation?.groupSelections ?? {}}
+                      onSetGroupSelection={handleSetGroupSelection}
+                      contextState={contextState}
+                      compactionInProgress={contextCompressing || agentLoopCompacting}
+                      animateCompactionBoundaryId={animateCompactionBoundaryId}
+                      lang={uiLang}
+                    />
+                  </Suspense>
+                  {taskStatus === 'completed' && (currentConversation?.last_run_receipt ?? currentConversation?.lastRunReceipt) && (
+                    <CompletionReceipt
+                      receipt={(currentConversation.last_run_receipt ?? currentConversation.lastRunReceipt)!}
+                      lang={uiLang === 'en' ? 'en' : 'zh'}
+                    />
+                  )}
+                  <InputBar
+                    onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                    disabled={isCurrentConversationBusy()}
+                    onCancel={() => void handleCancelStream()}
+                    cancelVisible={streamCoarse.streaming}
+                    cancelling={streamCoarse.cancelling}
+                    onOpenSettings={() => openEmbeddedSettings('chat')}
+                    onOpenTools={undefined}
+                    onNewChat={() => void handleNewConversation()}
+                    onCompactContext={() => void handlePiCompact()}
+                    onClearChat={() => void handleClearChat()}
+                    enabledTools={enabledTools}
+                    toolsDisabledReason={toolsDisabledReason}
+                    toolStatusHint={toolStatusHint}
+                    sendDisabledReason={sendDisabledReason}
+                    agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
+                    onAgentPlanModeChange={handleAgentPlanModeChange}
+                    enabledSkills={[]}
+                    onOpenSkillSettings={undefined}
+                    selectedProject={selectedProject}
+                    conversationProject={conversationProject}
+                    onSelectProject={handleSidebarSelectProject}
+                    showProjectEntry
+                    currentAssistant={null}
+                    onOpenAssistantCenter={undefined}
+                    onSelectAssistant={undefined}
+                    autoFocus
+                    usesExternalRuntime={false}
+                    externalAgentName={null}
+                    conversationId={currentConversation?.id ?? null}
+                    knowledgeBaseIds={currentConversation ? (currentConversation.knowledge_base_ids ?? currentConversation.knowledgeBaseIds ?? []) : draftKnowledgeBaseIds}
+                    onChangeKnowledgeBaseIds={undefined}
+                    forceKnowledgeSearch={currentConversation ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false) : draftForceKnowledgeSearch}
+                    onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
+                    mcpServers={mcpServers}
+                    onToggleMcpServer={handleToggleMcpServer}
+                    webSearchEnabled={webSearchEnabled}
+                    onToggleWebSearch={handleToggleWebSearch}
+                    replyModels={activeReplyModels}
+                    onChangeReplyModels={undefined}
+                    contextSlot={
+                      <ContextIndicator
+                        contextState={contextState}
+                        messageCount={displayMessages.length}
+                        loading={contextLoading}
+                        compressing={contextCompressing}
+                        error={contextError}
+                        usesExternalRuntime={false}
+                        onRefresh={handleRefreshContext}
+                        onCompress={() => void handleCompressContext()}
+                        lang={uiLang}
+                      />
+                    }
+                  />
+                    </>
+                  )}
+                </div>
+              </>
+            {imageViewerItem && (
+              <div className="absolute inset-0 z-40 flex flex-col">
+                <ChatImageViewer
+                  item={imageViewerItem}
+                  onClose={() => setImageViewerItem(null)}
+                />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      {pendingToolConfirm && (
+        <ScopedApprovalDialog
+          title={scopedApprovalTitle(pendingToolConfirm.name)}
+          description={`${managedBeefApiRoute
+            ? '此确认只对当前任务的这一次动作有效'
+            : pendingToolConfirm.source}${!managedBeefApiRoute && pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}${pendingToolConfirm.sensitivity ? ` · ${pendingToolConfirm.sensitivity}` : ''}`}
+          approveLabel="允许"
+          preview={pendingToolConfirm.argumentsPreview ? (
+            <pre className="custom-scrollbar mb-3 max-h-40 overflow-auto rounded-[5px] bg-[var(--beef-raised)] p-3 text-[11px] leading-relaxed text-[var(--beef-text)]">
+              {pendingToolConfirm.argumentsPreview}
+            </pre>
+          ) : undefined}
+          onReject={() => resolvePendingToolConfirm(false)}
+          onApprove={() => resolvePendingToolConfirm(true)}
+        />
+      )}
+      {pendingProjectTrust && (
+        <PiProjectTrustDialog
+          project={pendingProjectTrust.project}
+          preview={pendingProjectTrust.preview}
+          saving={savingProjectTrust}
+          error={projectTrustError}
+          onTrust={() => void trustAndSelectProject()}
+          onCancel={() => {
+            if (savingProjectTrust) return
+            setPendingProjectTrust(null)
+            setProjectTrustError('')
+          }}
+        />
+      )}
+      {pendingSessionConsent && (
+        <ScopedApprovalDialog
+          title="允许本次会话使用文件和命令工具？"
+          description="授权后，本会话内 Beefex 可读取、写入、删除磁盘上的任意文件，并执行任意终端命令（包括项目目录之外的位置）。仅本次会话有效，应用重启后需重新授权。"
+          approveLabel="允许本次会话"
+          onReject={() => resolvePendingSessionConsent(false)}
+          onApprove={() => resolvePendingSessionConsent(true)}
+        />
+      )}
+    </div>
+  )
+}
+
+function scopedApprovalTitle(name: string) {
+  const normalized = name.trim().toLowerCase()
+  if (/^(edit|write|apply_patch|delete|remove|move|rename)$/.test(normalized)) {
+    return '允许修改项目文件？'
+  }
+  if (/^(bash|shell|terminal|exec|command|run)$/.test(normalized)) {
+    return '允许运行终端命令？'
+  }
+  if (/^(fetch|http|network|web_search|search)$/.test(normalized)) {
+    return '允许访问网络？'
+  }
+  return '允许执行此工具动作？'
+}

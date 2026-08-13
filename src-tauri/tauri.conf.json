@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Beefex",
+  "version": "0.1.0",
+  "identifier": "com.beefapi.beefex",
+  "build": {
+    "beforeDevCommand": "npm run prepare:pyodide && npm run dev:ui",
+    "beforeBuildCommand": "npm run build:ui && npm run build:pi-runtime",
+    "devUrl": "http://localhost:5713",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Beefex",
+        "width": 392,
+        "height": 152,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "visibleOnAllWorkspaces": true,
+        "create": false,
+        "skipTaskbar": true,
+        "visible": false
+      }
+    ],
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "dmg",
+      "msi",
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/kivio-ocr-helper"
+    ],
+    "resources": {
+      "resources/skills": "skills",
+      "resources/pi": "pi"
+    },
+    "windows": {
+      "wix": {
+        "version": "0.1.0"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "macOS": {
+      "infoPlist": "Info.plist"
+    },
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+pub mod commands;
+pub mod compact;
+pub mod context;
+pub mod defs;
+pub mod detection;
+pub mod project_trust;
+pub mod prompt;
+pub mod registry;
+pub mod run;
+pub mod session;
+pub mod skill_stage;
+pub mod slash;
+pub mod spawn;
+pub mod stream;
+pub mod types;
+pub mod workspace;
+
+pub use run::{run_external_cli_reply, run_external_cli_slash_command};

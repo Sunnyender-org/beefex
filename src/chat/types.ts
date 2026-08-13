@@ -1,0 +1,590 @@
+// Chat 前端类型定义
+
+export type ToolCallStatus =
+  | 'pending'
+  | 'running'
+  | 'success'
+  | 'completed'
+  | 'error'
+  | 'skipped'
+  | 'cancelled'
+
+export interface SkillMeta {
+  id: string
+  name: string
+  description: string
+  source?: 'builtin' | 'user' | 'external' | string
+  path?: string
+  recommended_tools?: string[]
+  recommendedTools?: string[]
+  disable_model_invocation?: boolean
+  disableModelInvocation?: boolean
+  files?: SkillFileEntry[]
+  enabled?: boolean
+  triggers?: string[]
+  argument_hint?: string | null
+  argumentHint?: string | null
+  arguments?: string[]
+}
+
+export interface SkillFileEntry {
+  relative_path?: string
+  relativePath?: string
+  kind?: string
+  size_bytes?: number
+  sizeBytes?: number
+}
+
+export interface SkillDetail extends SkillMeta {
+  content?: string
+  body?: string
+  frontmatter?: Record<string, unknown>
+  updated_at?: number
+  updatedAt?: number
+}
+
+export interface ToolCallRecord {
+  id: string
+  conversationId?: string
+  runId?: string
+  messageId?: string
+  toolCallId?: string
+  call_id?: string
+  callId?: string
+  tool_name?: string
+  toolName?: string
+  name?: string
+  server_id?: string
+  serverId?: string
+  server_name?: string
+  serverName?: string
+  source?: string
+  status?: ToolCallStatus
+  started_at?: number
+  startedAt?: number
+  completed_at?: number
+  completedAt?: number
+  duration_ms?: number
+  durationMs?: number
+  arguments?: unknown
+  args?: unknown
+  input?: unknown
+  argument_preview?: string
+  argumentPreview?: string
+  argumentsPreview?: string
+  result?: unknown
+  output?: unknown
+  result_preview?: string
+  resultPreview?: string
+  error?: string
+  round?: number
+  sensitive?: boolean
+  requires_confirmation?: boolean
+  requiresConfirmation?: boolean
+  artifacts?: ChatToolArtifact[]
+  trace_id?: string | null
+  traceId?: string | null
+  span_id?: string | null
+  spanId?: string | null
+  structured_content?: unknown
+  structuredContent?: unknown
+}
+
+export type AskUserPhase = 'awaiting' | 'answered' | 'skipped' | 'timeout' | 'cancelled'
+
+export interface AskUserOption {
+  id: string
+  label: string
+  description?: string | null
+}
+
+export interface AskUserQuestion {
+  id: string
+  prompt: string
+  options: AskUserOption[]
+  allow_multiple?: boolean
+  allowMultiple?: boolean
+  allow_custom?: boolean
+  allowCustom?: boolean
+}
+
+export interface AskUserPromptPayload {
+  title?: string | null
+  questions: AskUserQuestion[]
+}
+
+export interface AskUserAnswer {
+  selected_option_ids?: string[]
+  selectedOptionIds?: string[]
+  custom_text?: string | null
+  customText?: string | null
+}
+
+export interface AskUserStructuredContent {
+  askUser?: {
+    phase?: AskUserPhase | string
+    title?: string | null
+    questions?: AskUserQuestion[]
+    answers?: Record<string, AskUserAnswer>
+  }
+}
+
+export interface ChatToolArtifact {
+  id?: string | null
+  name: string
+  mime_type?: string
+  mimeType?: string
+  data_url?: string
+  dataUrl?: string
+  size_bytes?: number | null
+  sizeBytes?: number | null
+  path?: string | null
+  filePath?: string | null
+  localPath?: string | null
+}
+
+export type ChatMessageSegmentKind = 'text' | 'reasoning' | 'tool'
+
+export type ChatMessageSegmentPhase = 'auxiliary' | 'plain' | 'tool_loop' | 'synthesis'
+
+export interface ChatMessageSegment {
+  id: string
+  kind: ChatMessageSegmentKind
+  phase: ChatMessageSegmentPhase
+  order: number
+  step_number?: number | null
+  stepNumber?: number | null
+  round?: number | null
+  text?: string | null
+  tool_call_id?: string | null
+  toolCallId?: string | null
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  attachments?: Attachment[]
+  reasoning?: string
+  artifacts?: ChatToolArtifact[]
+  tool_calls?: ToolCallRecord[]
+  toolCalls?: ToolCallRecord[]
+  segments?: ChatMessageSegment[]
+  agent_plan?: AgentPlanState | null
+  agentPlan?: AgentPlanState | null
+  api_messages?: unknown[]
+  apiMessages?: unknown[]
+  model_messages?: unknown[]
+  modelMessages?: unknown[]
+  active_skill_id?: string | null
+  activeSkillId?: string | null
+  run_entry?: 'send' | 'regenerate' | string | null
+  runEntry?: 'send' | 'regenerate' | string | null
+  stream_outcome?: 'completed' | 'cancelled' | 'error' | 'interrupted' | string | null
+  streamOutcome?: 'completed' | 'cancelled' | 'error' | 'interrupted' | string | null
+  /** Provider 报告的本条回复真实 token 用量（规划/合成/压缩累计）；不报告时缺省。 */
+  usage?: MessageUsage | null
+  /** 多模型一问多答：同一条 user 消息 fan-out 出的 N 条 assistant 共享同一个 group id；单模型为空。 */
+  group_id?: string | null
+  groupId?: string | null
+  /** 该 assistant 实际所用 provider id（多模型时每条各记自己的；单模型缺省回退会话级）。 */
+  provider_id?: string | null
+  providerId?: string | null
+  /** 该 assistant 实际所用 model（多模型时每条各记自己的；单模型缺省回退会话级）。 */
+  model?: string | null
+  timestamp: number
+}
+
+export interface MessageUsage {
+  input_tokens?: number | null
+  inputTokens?: number | null
+  output_tokens?: number | null
+  outputTokens?: number | null
+  total_tokens?: number | null
+  totalTokens?: number | null
+  cached_input_tokens?: number | null
+  cachedInputTokens?: number | null
+  cache_creation_input_tokens?: number | null
+  cacheCreationInputTokens?: number | null
+  reasoning_tokens?: number | null
+  reasoningTokens?: number | null
+}
+
+export interface Attachment {
+  id: string
+  type: 'image' | 'file'
+  name: string
+  path: string
+}
+
+export interface PendingAttachment {
+  id: string
+  type: 'image' | 'file'
+  name: string
+  path: string
+}
+
+export interface ChatProject {
+  id: string
+  name: string
+  description?: string | null
+  color?: string | null
+  root_path?: string | null
+  rootPath?: string | null
+  created_at: number
+  updated_at: number
+  createdAt?: number
+  updatedAt?: number
+}
+
+export interface PiProjectTrustPreview {
+  requestedPath: string
+  trustPath: string
+  isGitRepository: boolean
+  decision: 'trusted' | 'untrusted' | 'unknown'
+  inheritedFrom?: string | null
+  resources: string[]
+}
+
+/** Chat 集(Set)：助手之上的人设分组。不带工作目录，持有系统提示词 + 默认助手。 */
+export interface ChatSet {
+  id: string
+  name: string
+  system_prompt?: string
+  systemPrompt?: string
+  default_assistant_id?: string | null
+  defaultAssistantId?: string | null
+  color?: string | null
+  created_at: number
+  updated_at: number
+  createdAt?: number
+  updatedAt?: number
+}
+
+export interface ChatAssistant {
+  id: string
+  name: string
+  description?: string
+  icon?: string
+  color?: string
+  source?: 'builtin' | 'user' | 'imported' | string
+  system_prompt?: string
+  systemPrompt?: string
+  provider_id?: string
+  providerId?: string
+  model?: string
+  /** 允许使用的 MCP 服务器 id 白名单。空 = 不可用任何 MCP。 */
+  mcp_server_ids?: string[]
+  mcpServerIds?: string[]
+  /** 允许激活的技能 id 白名单。空 = 不可用任何技能。 */
+  skill_ids?: string[]
+  skillIds?: string[]
+  enabled?: boolean
+  installed?: boolean
+  archived?: boolean
+  built_in?: boolean
+  builtIn?: boolean
+  created_at: number
+  updated_at: number
+  createdAt?: number
+  updatedAt?: number
+}
+
+export interface ChatAssistantSnapshot {
+  id: string
+  name: string
+  description?: string
+  source?: 'builtin' | 'user' | 'imported' | string
+  system_prompt?: string
+  systemPrompt?: string
+  provider_id?: string
+  providerId?: string
+  model?: string
+  mcp_server_ids?: string[]
+  mcpServerIds?: string[]
+  skill_ids?: string[]
+  skillIds?: string[]
+}
+
+export type ContextUsageStatus =
+  | 'normal'
+  | 'warning'
+  | 'critical'
+  | 'compressed'
+  | 'stale'
+  | 'unknown'
+  | string
+
+export interface ContextUsageSegment {
+  id: string
+  label: string
+  estimated_tokens?: number
+  estimatedTokens?: number
+  color?: string | null
+}
+
+export interface CompactionBoundaryRecord {
+  id: string
+  source_until_message_id?: string
+  sourceUntilMessageId?: string
+  display_after_message_id?: string | null
+  displayAfterMessageId?: string | null
+  token_estimate_before?: number
+  tokenEstimateBefore?: number
+  token_estimate_after?: number
+  tokenEstimateAfter?: number
+  summary_content?: string
+  summaryContent?: string
+  trigger?: 'manual' | 'auto' | 'agent_loop' | string
+  created_at?: number
+  createdAt?: number
+}
+
+export interface ConversationContextSummary {
+  id: string
+  content: string
+  source_message_ids?: string[]
+  sourceMessageIds?: string[]
+  source_until_message_id?: string
+  sourceUntilMessageId?: string
+  token_estimate_before?: number
+  tokenEstimateBefore?: number
+  token_estimate_after?: number
+  tokenEstimateAfter?: number
+  created_at?: number
+  createdAt?: number
+  provider_id?: string
+  providerId?: string
+  model?: string
+  stale?: boolean
+}
+
+export interface ConversationContextState {
+  estimated_input_tokens?: number
+  estimatedInputTokens?: number
+  context_window_tokens?: number | null
+  contextWindowTokens?: number | null
+  context_window_estimated?: boolean
+  contextWindowEstimated?: boolean
+  usage_ratio?: number | null
+  usageRatio?: number | null
+  status?: ContextUsageStatus
+  segments?: ContextUsageSegment[]
+  last_measured_at?: number
+  lastMeasuredAt?: number
+  last_compressed_at?: number | null
+  lastCompressedAt?: number | null
+  compressed_message_count?: number
+  compressedMessageCount?: number
+  compression_count?: number
+  compressionCount?: number
+  summary?: ConversationContextSummary | null
+  compaction_boundaries?: CompactionBoundaryRecord[]
+  compactionBoundaries?: CompactionBoundaryRecord[]
+  warning?: string | null
+  warningMessage?: string | null
+  context_source?: 'kivio_builtin' | 'external_cli' | string
+  contextSource?: 'kivio_builtin' | 'external_cli' | string
+  token_count_source?: 'cli_reported' | 'estimated' | 'provider_reported' | string
+  tokenCountSource?: 'cli_reported' | 'estimated' | 'provider_reported' | string
+  session_input_tokens?: number
+  sessionInputTokens?: number
+  session_output_tokens?: number
+  sessionOutputTokens?: number
+  external_agent_id?: string
+  externalAgentId?: string
+  external_model?: string
+  externalModel?: string
+}
+
+export type AgentTodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
+
+export interface AgentTodoItem {
+  id: string
+  content: string
+  description?: string | null
+  status: AgentTodoStatus
+  blocks?: string[]
+  blocked_by?: string[]
+  owner?: string | null
+}
+
+export interface AgentTodoState {
+  items?: AgentTodoItem[]
+  updated_at?: number
+  updatedAt?: number
+}
+
+export type AgentPlanMode = 'act' | 'plan' | 'orchestrate'
+export type AgentPlanStatus = 'empty' | 'draft' | 'approved'
+
+export interface AgentPlanState {
+  mode?: AgentPlanMode
+  status?: AgentPlanStatus
+  plan?: string | null
+  updated_at?: number
+  updatedAt?: number
+}
+
+export interface AgentRuntimeConfig {
+  kind: 'builtin' | 'external'
+  externalAgentId?: string | null
+  external_agent_id?: string | null
+  externalModel?: string | null
+  external_model?: string | null
+  externalReasoning?: string | null
+  external_reasoning?: string | null
+  externalSandbox?: string | null
+  external_sandbox?: string | null
+}
+
+export interface DetectedExternalAgent {
+  id: string
+  name: string
+  available: boolean
+  path?: string | null
+  version?: string | null
+  models: Array<{ id: string; label: string; contextWindowTokens?: number | null; context_window_tokens?: number | null }>
+  reasoningOptions?: Array<{ id: string; label: string }>
+  reasoning_options?: Array<{ id: string; label: string }>
+  sandboxOptions?: Array<{ id: string; label: string }>
+  sandbox_options?: Array<{ id: string; label: string }>
+  authStatus?: string | null
+  auth_status?: string | null
+}
+
+export interface Conversation {
+  id: string
+  title: string
+  provider_id: string
+  model: string
+  messages: ChatMessage[]
+  active_skill_id?: string | null
+  activeSkillId?: string | null
+  assistant_id?: string | null
+  assistantId?: string | null
+  assistant_snapshot?: ChatAssistantSnapshot | null
+  assistantSnapshot?: ChatAssistantSnapshot | null
+  created_at: number
+  updated_at: number
+  pinned?: boolean
+  folder?: string
+  project_id?: string | null
+  projectId?: string | null
+  set_id?: string | null
+  setId?: string | null
+  context_state?: ConversationContextState
+  contextState?: ConversationContextState
+  agent_todo_state?: AgentTodoState
+  agentTodoState?: AgentTodoState
+  agent_plan_state?: AgentPlanState
+  agentPlanState?: AgentPlanState
+  agent_runtime?: AgentRuntimeConfig
+  agentRuntime?: AgentRuntimeConfig
+  knowledge_base_ids?: string[]
+  knowledgeBaseIds?: string[]
+  force_knowledge_search?: boolean
+  forceKnowledgeSearch?: boolean
+  thinking_level?: ThinkingLevel | null
+  thinkingLevel?: ThinkingLevel | null
+  /** 多模型一问多答（D2）：会话级持久化的多答模型集合（上限 4）。空或单元素 = 单模型现状。 */
+  reply_models?: ModelRef[]
+  replyModels?: ModelRef[]
+  /** 多答组「选中条」（D5）：group_id → 被采纳进下一轮历史的 assistant message id。无记录取该组第一条。 */
+  group_selections?: Record<string, string>
+  groupSelections?: Record<string, string>
+  /** 对话分支来源（方案 B）：本对话由某对话某消息处分叉而来。 */
+  forked_from?: ForkOrigin | null
+  forkedFrom?: ForkOrigin | null
+  last_run_status?: ChatTaskStatus | null
+  lastRunStatus?: ChatTaskStatus | null
+  last_run_id?: string | null
+  lastRunId?: string | null
+  last_run_terminal_at?: number | null
+  lastRunTerminalAt?: number | null
+  last_run_receipt?: ChatCompletionReceipt | null
+  lastRunReceipt?: ChatCompletionReceipt | null
+}
+
+export type ChatTaskStatus =
+  | 'idle'
+  | 'running'
+  | 'awaiting_approval'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
+export interface ChatChangedFileReceipt {
+  path: string
+  additions: number
+  removals: number
+  has_diff?: boolean
+  hasDiff?: boolean
+}
+
+export interface ChatCommandReceipt {
+  command: string
+  cwd: string
+  exit_status?: number | null
+  exitStatus?: number | null
+  stdout: string
+}
+
+export interface ChatCompletionReceipt {
+  changed_files?: ChatChangedFileReceipt[]
+  changedFiles?: ChatChangedFileReceipt[]
+  commands: ChatCommandReceipt[]
+  validations: string[]
+}
+
+/** 对话分支来源快照（方案 B）。 */
+export interface ForkOrigin {
+  conversation_id?: string
+  conversationId?: string
+  message_id?: string
+  messageId?: string
+  title: string
+}
+
+/** 一次回答所用的 (provider, model) 引用。多模型一问多答的会话级模型集元素。 */
+export interface ModelRef {
+  provider_id: string
+  model: string
+}
+
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+export interface ConversationListItem {
+  id: string
+  title: string
+  preview: string
+  provider_id: string
+  model: string
+  message_count: number
+  created_at: number
+  updated_at: number
+  pinned?: boolean
+  folder?: string
+  project_id?: string | null
+  projectId?: string | null
+  set_id?: string | null
+  setId?: string | null
+  assistant_id?: string | null
+  assistantId?: string | null
+  assistant_name?: string | null
+  assistantName?: string | null
+  forked_from?: ForkOrigin | null
+  forkedFrom?: ForkOrigin | null
+  last_run_status?: ChatTaskStatus | null
+  lastRunStatus?: ChatTaskStatus | null
+  last_run_id?: string | null
+  lastRunId?: string | null
+  last_run_terminal_at?: number | null
+  lastRunTerminalAt?: number | null
+}
+
+export type ChatUserProfile = {
+  displayName: string
+  avatarUrl: string
+}

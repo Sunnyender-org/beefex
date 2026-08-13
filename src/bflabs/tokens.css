@@ -1,0 +1,27 @@
+:root {
+  --bflabs-canvas: #faf9f7;
+  --bflabs-surface: #ffffff;
+  --bflabs-surface-raised: #f2f0ed;
+  --bflabs-text: #211d1a;
+  --bflabs-text-muted: rgba(33, 29, 26, 0.68);
+  --bflabs-divider: rgba(33, 29, 26, 0.12);
+  --bflabs-accent: #e26a3e;
+  --bflabs-accent-pressed: #c25224;
+  --bflabs-success: #6b8e3d;
+  --bflabs-focus-ring: 0 0 0 2px rgba(226, 106, 62, 0.24);
+  --bflabs-radius-control: 5px;
+  --bflabs-radius-surface: 6px;
+}
+
+.dark {
+  --bflabs-canvas: #1a120e;
+  --bflabs-surface: #2a1d17;
+  --bflabs-surface-raised: #2d2018;
+  --bflabs-text: #ffeeda;
+  --bflabs-text-muted: rgba(255, 238, 218, 0.72);
+  --bflabs-divider: rgba(255, 238, 218, 0.12);
+  --bflabs-accent: #e88862;
+  --bflabs-accent-pressed: #e26a3e;
+  --bflabs-success: #9cc267;
+  --bflabs-focus-ring: 0 0 0 2px rgba(232, 136, 98, 0.28);
+}

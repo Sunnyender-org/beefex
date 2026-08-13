@@ -1,0 +1,59 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+dist-electron
+release
+src-tauri/target
+# rust-analyzer 在 workspace 根生成的 cache,不是 cargo 用户产物
+/target
+
+# Local build artifacts (OCR helper)
+resources/ocr
+.cache/swift
+resources/python-sandbox/pyodide
+
+# Swift sidecar 编译产物 (npm run build:swift / CI 生成,不入库)
+src-tauri/binaries/
+src-tauri/resources/pi/bin/
+src-tauri/swift/kivio-ai-helper/.build/
+src-tauri/swift/kivio-ocr-helper/.build/
+
+.superpowers/
+
+# CodeGraph 本地索引（生成物 / 本地缓存，不入库）
+.codegraph/
+
+# AI agent 工具脚手架（各 CLI / Trellis 生成的本地配置与依赖产物，不入库）
+.agents/
+.claude/
+.codex/
+.cursor/
+.opencode/
+# Project-management and local acceptance evidence are not part of the public source tree.
+.trellis/
+/output/
+
+# Local runtime discovery caches and manual E2E artifacts
+/mcps/

@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "status": "locally_replayed",
+  "description": "Synthetic approval scenarios. Implementation adapters must call the production pending-approval, active-run and tool execution boundaries using only a temporary project.",
+  "invariant_sources": [
+    "../prd.md#p0-04-native-coding-loop",
+    "../prd.md#p0-05-scoped-approval",
+    "../prd.md#p0-06-diff-and-completion-readback",
+    "../design.md#8-approval-hardening"
+  ],
+  "cases": [
+    {
+      "id": "exact_active_file_approval_executes_with_diff_receipt",
+      "input": {
+        "pending": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-file-1"},
+        "response": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-file-1", "approved": true},
+        "run_state": "awaiting_approval",
+        "tool": {"kind": "edit_file", "target": "project/src/demo.ts"}
+      },
+      "expected": {
+        "decision": "allow",
+        "reason_code": "approval_matched_active_run",
+        "approval_resolved": true,
+        "tool_executed": true,
+        "side_effect_observed": true,
+        "receipt_evidence": ["project_relative_path", "non_empty_diff"]
+      }
+    },
+    {
+      "id": "mismatched_tool_call_is_denied",
+      "input": {
+        "pending": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-file-1"},
+        "response": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-other", "approved": true},
+        "run_state": "awaiting_approval",
+        "tool": {"kind": "edit_file", "target": "project/src/demo.ts"}
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "approval_identity_mismatch",
+        "approval_resolved": false,
+        "tool_executed": false,
+        "side_effect_observed": false,
+        "receipt_evidence": ["denial_event"]
+      }
+    },
+    {
+      "id": "interrupted_run_approval_is_stale",
+      "input": {
+        "pending": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-file-1"},
+        "response": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-file-1", "approved": true},
+        "run_state": "interrupted",
+        "tool": {"kind": "edit_file", "target": "project/src/demo.ts"}
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "run_not_active",
+        "approval_resolved": false,
+        "tool_executed": false,
+        "side_effect_observed": false,
+        "receipt_evidence": ["stale_approval_event"]
+      }
+    },
+    {
+      "id": "cancelled_run_approval_is_denied",
+      "input": {
+        "pending": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-shell-1"},
+        "response": {"conversation_id": "task-a", "run_id": "run-1", "tool_call_id": "tool-shell-1", "approved": true},
+        "run_state": "cancelled",
+        "tool": {"kind": "run_command", "cwd": "project", "command": "printf safe"}
+      },
+      "expected": {
+        "decision": "deny",
+        "reason_code": "run_cancelled",
+        "approval_resolved": false,
+        "tool_executed": false,
+        "side_effect_observed": false,
+        "receipt_evidence": ["cancel_event"]
+      }
+    },
+    {
+      "id": "exact_active_shell_approval_records_command_receipt",
+      "input": {
+        "pending": {"conversation_id": "task-a", "run_id": "run-2", "tool_call_id": "tool-shell-2"},
+        "response": {"conversation_id": "task-a", "run_id": "run-2", "tool_call_id": "tool-shell-2", "approved": true},
+        "run_state": "awaiting_approval",
+        "tool": {"kind": "run_command", "cwd": "project", "command": "printf safe"}
+      },
+      "expected": {
+        "decision": "allow",
+        "reason_code": "approval_matched_active_run",
+        "approval_resolved": true,
+        "tool_executed": true,
+        "side_effect_observed": false,
+        "receipt_evidence": ["full_command", "project_cwd", "exit_status", "stdout"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,3935 @@
+use chrono::{Datelike, Local};
+use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
+use tauri_plugin_store::StoreBuilder;
+
+// 设置存储文件名
+const SETTINGS_STORE: &str = "settings.json";
+const LEGACY_APPLE_INTELLIGENCE_BASE_URL: &str = "applefoundation://local";
+const BEEFAPI_RESPONSES_BASE_URL: &str = "https://beefapi.com/v1";
+
+// ========== 数据结构定义 ==========
+
+/**
+ * 旧版 OpenAI 配置（用于迁移兼容）
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OpenAIConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_openai_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_openai_model")]
+    pub model: String,
+}
+
+impl Default for OpenAIConfig {
+    fn default() -> Self {
+        Self {
+            api_key: "".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o".to_string(),
+        }
+    }
+}
+
+/**
+ * AI 模型提供商配置
+ *
+ * api_keys 支持多 key failover：第一个为主 key，后续为备用 key；
+ * 当某个 key 触发配额/限流/鉴权失败时会自动切换到下一个。
+ *
+ * api_key_legacy 字段仅用于反序列化兼容旧版（v2.3.1 及之前）单 key 配置，
+ * sanitize_settings 会把它合并到 api_keys[0]。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProvider {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "apiKey")]
+    pub api_key_legacy: Option<String>,
+    pub base_url: String,
+    #[serde(default)]
+    pub available_models: Vec<String>,
+    #[serde(default)]
+    pub enabled_models: Vec<String>,
+    /// 关闭后该供应商不会出现在模型选择器中，已引用它的功能会在保存时切到第一个启用的供应商。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// API 格式：`openai_chat`、`openai_responses`、`anthropic_messages` 或 `gemini`。
+    /// 旧值 `openai` / `anthropic` 会在 `sanitize_settings` 中归一化。
+    #[serde(default = "default_api_format")]
+    pub api_format: String,
+    /// 用户自定义的模型参数覆盖（仅持久化用户显式修改的字段）
+    #[serde(default)]
+    pub model_overrides: std::collections::HashMap<String, ModelInfo>,
+    /// 是否对请求体做 gzip 压缩再发送。默认关。
+    /// 用于个别供应商前置的 Cloudflare WAF 会扫明文请求体、把 agent 工具/系统提示里的
+    /// shell 命令、文件路径、SQL 等文本误判为攻击而返回 403「Blocked」的情况——
+    /// gzip 后 WAF 不解析压缩体即可放行（后端需接受 gzip 请求，多数 OpenAI 兼容网关支持）。
+    /// 不接受 gzip 的供应商（如官方 DeepSeek）请保持关闭，否则会 400。
+    #[serde(default)]
+    pub compress_request_body: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderApiFormat {
+    OpenAiChat,
+    AnthropicMessages,
+    /// OpenAI Responses API (`POST /v1/responses`). Used by Codex / Responses-native
+    /// models and proxies that only emit tool-call arguments over this protocol.
+    OpenAiResponses,
+    /// Google Gemini native `generateContent` protocol. Avoids the OpenAI-compat
+    /// endpoint's strict rejection of unknown fields (e.g. `promptCacheKey` 400).
+    Gemini,
+}
+
+impl ProviderApiFormat {
+    pub fn from_raw(raw: &str) -> Self {
+        match raw.trim() {
+            "anthropic" | "anthropic_messages" => Self::AnthropicMessages,
+            "openai_responses" | "responses" => Self::OpenAiResponses,
+            "gemini" | "google" | "gemini_generate" => Self::Gemini,
+            _ => Self::OpenAiChat,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiChat => "openai_chat",
+            Self::AnthropicMessages => "anthropic_messages",
+            Self::OpenAiResponses => "openai_responses",
+            Self::Gemini => "gemini",
+        }
+    }
+}
+
+impl ModelProvider {
+    pub fn api_format_kind(&self) -> ProviderApiFormat {
+        ProviderApiFormat::from_raw(&self.api_format)
+    }
+}
+
+/**
+ * 模型能力信息（来自内置数据库或用户自定义）
+ */
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelInfo {
+    pub display_name: Option<String>,
+    pub context_window: Option<u64>,
+    pub max_output: Option<u64>,
+    /// 模型级采样温度；None 表示请求默认不发送 temperature。
+    pub temperature: Option<f64>,
+    /// 用户显式清空温度时阻止回落到模型库默认值。仅用于 model_overrides。
+    pub omit_temperature: Option<bool>,
+    pub capabilities: Option<ModelCapabilities>,
+    pub pricing: Option<ModelPricing>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelCapabilities {
+    pub vision: Option<bool>,
+    pub function_calling: Option<bool>,
+    pub reasoning: Option<bool>,
+    pub streaming: Option<bool>,
+    pub web_search: Option<bool>,
+    pub image_generation: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelPricing {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cached_input: Option<f64>,
+}
+
+/**
+ * OCR 引擎模式（截图翻译用）
+ *
+ * - CloudVision：发图给多模态 provider 一次完成 OCR+翻译（旧 use_system_ocr=false 等价行为）
+ * - System：调用 macOS Apple Vision 或 Windows.Media.Ocr 识别文字，再交 provider 翻译
+ * - RapidOcr：本地 RapidOCR (PaddleOCR ONNX) 识别文字，再交 provider 翻译。onnxruntime
+ *   dylib 与模型文件均由用户在设置页面下载到 app data 目录，安装包不含。
+ * - Legacy：反序列化兜底，吸收旧版本 settings.json 里的未知字符串（如 "tesseract"），
+ *   sanitize_settings 会迁移到 RapidOcr，保留旧版离线 OCR 的隐私边界。
+ *
+ * 字段在 sanitize_settings 中由 use_system_ocr 自动迁移：true→System，false→CloudVision。
+ * persist_settings 写盘时反向镜像到 use_system_ocr 维持降级到 v2.5.x 的兼容性。
+ * RapidOcr 模式降级会落回 CloudVision（use_system_ocr=false），可接受。
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrMode {
+    CloudVision,
+    System,
+    RapidOcr,
+    #[serde(other)]
+    Legacy,
+}
+
+impl Default for OcrMode {
+    fn default() -> Self {
+        OcrMode::CloudVision
+    }
+}
+
+/**
+ * 截图翻译功能配置
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScreenshotTranslationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_screenshot_translation_hotkey")]
+    pub hotkey: String,
+    #[serde(default = "default_screenshot_translation_text_hotkey")]
+    pub text_hotkey: String,
+    /// 替换翻译独立热键（框选后在原位覆盖译文，固定 RapidOCR）。
+    #[serde(default = "default_screenshot_translation_replace_hotkey")]
+    pub replace_hotkey: String,
+    #[serde(default = "default_true")]
+    pub replace_enabled: bool,
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default = "default_openai_model")]
+    pub model: String,
+    #[serde(default = "default_false")]
+    pub direct_translate: bool,
+    /// 是否启用思考模式（OCR 模型 + 翻译模型）。默认 false：截图翻译追求快，思考通常没必要。
+    #[serde(default = "default_false")]
+    pub thinking_enabled: bool,
+    /// 是否流式输出 OCR + 翻译。默认 true：用户看着字逐步出现的体感比等"加载完"更顺。
+    #[serde(default = "default_true")]
+    pub stream_enabled: bool,
+    /// 截图后是否保留 lens 全屏覆盖。默认 true：选区高亮 + 译文卡同屏；false → lens 缩成浮动小窗，不挡下层 app。
+    #[serde(default = "default_true")]
+    pub keep_fullscreen_after_capture: bool,
+
+    /// 快速翻译结果卡左右宽度（px）。截图翻译与选中文本翻译两种卡共用，保证宽度一致且可调。
+    #[serde(default = "default_translate_card_width")]
+    pub card_width: u32,
+    /// 用平台本地 OCR 做文字识别，把识别出的文字喂给翻译模型（macOS Apple Vision / Windows OCR）。
+    /// true → 系统 OCR + provider 文字翻译（provider 可是任意 OpenAI 兼容 endpoint）
+    /// false → provider 必须是多模态模型，一次完成 OCR+翻译
+    ///
+    /// 从 vNext 起，截图翻译路由实际走 ocr_mode 字段；本字段仅作降级镜像保留：
+    /// - persist_settings 写盘时根据 ocr_mode 反向镜像到这里（System→true，其它→false），
+    ///   让降级到 v2.5.x 的版本仍能从 useSystemOcr 字段读到对应行为。
+    /// - sanitize_settings 在 ocr_mode 缺省时会从这里反推迁移。
+    #[serde(default = "default_false")]
+    pub use_system_ocr: bool,
+    /// OCR 引擎选择（vNext+）。None 表示老版本数据，会在 sanitize_settings 中按 use_system_ocr 迁移。
+    #[serde(default)]
+    pub ocr_mode: Option<OcrMode>,
+    /// 截图(OCR/视觉)翻译自定义提示词。空 → 用内置截图模板。
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// 选中文本翻译自定义提示词。空 → 用内置选中文本模板。独立于 `prompt`：
+    /// 选中文本是干净结构化文本，与 OCR 噪声场景的提示词需求不同。
+    #[serde(default)]
+    pub text_prompt: Option<String>,
+    /// 替换翻译自定义提示词（仅注入翻译规则块，JSON 输出契约固定）。空 → 用内置替换模板。
+    #[serde(default)]
+    pub replace_prompt: Option<String>,
+    /// RapidOCR 模型档位:"standard"(默认,PP-OCRv5 mobile,速度优先) | "high"(PP-OCRv6 medium,精度优先)。
+    /// 仅在 ocr_mode = RapidOcr 时生效;替换翻译（固定走 RapidOCR）跟随此字段。
+    #[serde(default = "default_rapid_ocr_tier")]
+    pub rapid_ocr_tier: String,
+    // 旧版字段，用于迁移
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAIConfig>,
+}
+
+impl Default for ScreenshotTranslationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: "CommandOrControl+Shift+A".to_string(),
+            text_hotkey: "CommandOrControl+Shift+T".to_string(),
+            replace_hotkey: "CommandOrControl+Shift+R".to_string(),
+            replace_enabled: true,
+            provider_id: "default-ocr".to_string(),
+            model: "gpt-4o".to_string(),
+            direct_translate: false,
+            thinking_enabled: false,
+            stream_enabled: true,
+            keep_fullscreen_after_capture: true,
+            card_width: default_translate_card_width(),
+            use_system_ocr: false,
+            ocr_mode: Some(OcrMode::CloudVision),
+            prompt: None,
+            text_prompt: None,
+            replace_prompt: None,
+            rapid_ocr_tier: default_rapid_ocr_tier(),
+            openai: None,
+        }
+    }
+}
+
+/// RapidOCR 档位默认值,截图翻译用(要速度)。
+fn default_rapid_ocr_tier() -> String {
+    "standard".to_string()
+}
+
+/// 知识库文档处理默认走高精度(v6 medium):入库不在乎慢,要识别质量。
+fn default_rapid_ocr_tier_high() -> String {
+    "high".to_string()
+}
+
+/**
+ * 对话消息（Lens 多轮对话）
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/**
+ * Lens 联网搜索提供商。
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchProvider {
+    Tavily,
+    Exa,
+    ExaMcp,
+    Ollama,
+    Grok,
+    /// 前端可能列出尚未接入后端的占位服务商；持久化时兜底为未知，避免旧值导致整份设置解析失败。
+    #[serde(other)]
+    Unknown,
+}
+
+impl Default for WebSearchProvider {
+    fn default() -> Self {
+        WebSearchProvider::Tavily
+    }
+}
+
+/**
+ * Lens 联网搜索配置。
+ *
+ * 手动模式由前端在单次提问时传 web_search=true；后端仍会检查 enabled 和 key。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LensWebSearchConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: WebSearchProvider,
+    #[serde(default)]
+    pub tavily_api_key: String,
+    #[serde(default)]
+    pub exa_api_key: String,
+    #[serde(default = "default_exa_mcp_url")]
+    pub exa_mcp_url: String,
+    #[serde(default)]
+    pub ollama_api_key: String,
+    #[serde(default)]
+    pub grok_api_key: String,
+    #[serde(default = "default_grok_model")]
+    pub grok_model: String,
+    #[serde(default = "default_grok_base_url")]
+    pub grok_base_url: String,
+    #[serde(default = "default_grok_system_prompt")]
+    pub grok_system_prompt: String,
+    #[serde(default = "default_web_search_max_results")]
+    pub max_results: u8,
+    #[serde(default = "default_web_search_depth")]
+    pub search_depth: String,
+}
+
+impl Default for LensWebSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: WebSearchProvider::Tavily,
+            tavily_api_key: String::new(),
+            exa_api_key: String::new(),
+            exa_mcp_url: default_exa_mcp_url(),
+            ollama_api_key: String::new(),
+            grok_api_key: String::new(),
+            grok_model: default_grok_model(),
+            grok_base_url: default_grok_base_url(),
+            grok_system_prompt: default_grok_system_prompt(),
+            max_results: default_web_search_max_results(),
+            search_depth: default_web_search_depth(),
+        }
+    }
+}
+
+fn default_exa_mcp_url() -> String {
+    "https://mcp.exa.ai/mcp".to_string()
+}
+
+fn default_grok_model() -> String {
+    "grok-4-1-fast-non-reasoning".to_string()
+}
+
+fn default_grok_base_url() -> String {
+    "https://api.x.ai/v1".to_string()
+}
+
+pub fn default_grok_system_prompt() -> String {
+    "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations."
+        .to_string()
+}
+
+fn default_web_search_max_results() -> u8 {
+    5
+}
+
+fn default_web_search_depth() -> String {
+    "basic".to_string()
+}
+
+/**
+ * Lens 模式配置
+ * 启用后可通过热键进入：屏幕高亮选择窗口/区域 → 截图 → 在悬浮对话栏内提问。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LensConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_lens_hotkey")]
+    pub hotkey: String,
+    /// provider/model 留空时 fallback 到 translator_provider_id / translator_model
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: String,
+    /// 响应语言（"zh"/"en"）。空字符串表示跟随 settings.target_lang，"auto" 则用 "zh"。
+    #[serde(default)]
+    pub default_language: String,
+    /// 是否流式返回，默认 true。
+    #[serde(default = "default_true")]
+    pub stream_enabled: bool,
+    /// 是否启用思考模式（推理链）。默认 true。
+    /// false 时会向请求 body 注入各家厂商关闭思考的字段并集（不认识的会被 provider 忽略）。
+    #[serde(default = "default_true")]
+    pub thinking_enabled: bool,
+    /// 自定义 system prompt。空字符串使用 default_system_prompt 模板。
+    #[serde(default)]
+    pub system_prompt: String,
+    /// 自定义 question prompt。空字符串使用 default_question_prompt 模板。
+    #[serde(default)]
+    pub question_prompt: String,
+    /// Lens 提问默认发送到 AI 客户端。关闭后保留旧的 Lens 浮窗内回答。
+    #[serde(default = "default_true")]
+    pub send_to_chat: bool,
+    /// 消息排序："asc" 老到新（默认），"desc" 新到老
+    #[serde(default = "default_message_order")]
+    pub message_order: String,
+    /// 进入截图选择态时是否显示顶部提示。默认 true，避免用户按下快捷键后看不出已进入截图模式。
+    #[serde(default = "default_true")]
+    pub show_capture_hint: bool,
+    /// Windows 兼容模式：进入截图选择态前先抓取当前显示器冻结帧，再在覆盖层内显示和裁剪冻结帧。
+    /// Windows 默认 true（规避浏览器视频在透明置顶 WebView2 下变黑）；其他平台不生效。
+    #[serde(default = "default_windows_freeze_frame_selection")]
+    pub windows_freeze_frame_selection: bool,
+    #[serde(default)]
+    pub web_search: LensWebSearchConfig,
+}
+
+fn default_message_order() -> String {
+    "asc".to_string()
+}
+
+pub fn default_chat_max_output_tokens() -> u32 {
+    32768
+}
+
+pub(crate) fn clamp_chat_max_output_tokens(value: u32) -> u32 {
+    value.clamp(512, 65_536)
+}
+
+impl Default for LensConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: "CommandOrControl+Shift+G".to_string(),
+            provider_id: String::new(),
+            model: String::new(),
+            default_language: String::new(),
+            stream_enabled: true,
+            thinking_enabled: true,
+            system_prompt: String::new(),
+            question_prompt: String::new(),
+            send_to_chat: true,
+            message_order: "asc".to_string(),
+            show_capture_hint: true,
+            windows_freeze_frame_selection: default_windows_freeze_frame_selection(),
+            web_search: LensWebSearchConfig::default(),
+        }
+    }
+}
+
+/**
+ * AI 客户端（Chat）行为配置：与 Lens 分离，避免截图问答与对话客户端共用开关。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatConfig {
+    #[serde(default = "default_true")]
+    pub stream_enabled: bool,
+    #[serde(default = "default_true")]
+    pub thinking_enabled: bool,
+    /// Chat 模型最终回答最大输出 tokens。
+    #[serde(default = "default_chat_max_output_tokens")]
+    pub max_output_tokens: u32,
+    /// 响应语言（"zh"/"en" 等）。空字符串表示跟随 Lens 默认语言，再跟随 target_lang。
+    #[serde(default)]
+    pub default_language: String,
+    /// 自定义 system prompt；空则使用内置 Chat 模板。
+    #[serde(default)]
+    pub system_prompt: String,
+    /// Chat 侧栏显示的用户名；空则前端使用默认文案。
+    #[serde(default)]
+    pub user_display_name: String,
+    /// 头像图片 URL 或 data URL；空则显示首字母占位头像。
+    #[serde(default)]
+    pub user_avatar: String,
+    /// 新建对话默认 Agent 运行时（内置 loop 或外部 CLI）。
+    #[serde(default)]
+    pub default_agent_runtime: crate::chat::AgentRuntimeConfig,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            stream_enabled: true,
+            thinking_enabled: true,
+            max_output_tokens: default_chat_max_output_tokens(),
+            default_language: String::new(),
+            system_prompt: String::new(),
+            user_display_name: String::new(),
+            user_avatar: String::new(),
+            default_agent_runtime: crate::chat::AgentRuntimeConfig::default(),
+        }
+    }
+}
+
+/**
+ * Chat 记忆系统配置。
+ *
+ * 记忆正文不存 settings.json；这里只保存运行开关。正文保存在 app data 的 chat-memory/L1.md
+ * 与 chat-memory/L2.md 中。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatMemoryConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    /// 已废弃：memory 工具现均无需用户确认；保留字段仅作旧配置兼容。
+    #[serde(default = "default_false")]
+    pub tool_write_confirm: bool,
+}
+
+impl Default for ChatMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tool_write_confirm: false,
+        }
+    }
+}
+
+/**
+ * 可选模型选择：provider_id 为空表示未单独设置。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DefaultModelSelection {
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+impl Default for DefaultModelSelection {
+    fn default() -> Self {
+        Self {
+            provider_id: String::new(),
+            model: String::new(),
+        }
+    }
+}
+
+impl DefaultModelSelection {
+    fn is_configured(&self) -> bool {
+        !self.provider_id.trim().is_empty()
+    }
+}
+
+/// 当前 Chat 会话的主模型（顶栏选择），用于混音器 auto 时解析副任务路由。
+#[derive(Debug, Clone, Copy)]
+pub struct SessionModel<'a> {
+    pub provider_id: &'a str,
+    pub model: &'a str,
+}
+
+impl<'a> SessionModel<'a> {
+    pub fn is_set(self) -> bool {
+        !self.provider_id.trim().is_empty() && !self.model.trim().is_empty()
+    }
+}
+
+fn resolve_mixer_side_model(
+    selection: &DefaultModelSelection,
+    session: Option<SessionModel<'_>>,
+    settings: &Settings,
+) -> (String, String) {
+    if selection.is_configured() {
+        return (selection.provider_id.clone(), selection.model.clone());
+    }
+    if let Some(session) = session.filter(|session| session.is_set()) {
+        return (session.provider_id.to_string(), session.model.to_string());
+    }
+    settings.effective_chat_model()
+}
+
+/**
+ * 默认模型配置。
+ *
+ * chat：新建 Chat 对话的全局默认模型；为空时沿用 Lens → 输入翻译的兜底链路。
+ * vision：图片附件分析副任务使用；为空时继承当前会话主模型（无会话时回退有效 Chat 默认）。
+ * title_summary：标题总结副任务使用；为空时继承当前会话主模型（无会话时回退有效 Chat 默认）。
+ * compression：上下文/历史对话压缩副任务使用；为空时继承当前会话主模型（无会话时回退有效 Chat 默认）。
+ * image_generation：生图副任务使用；为空时若当前会话主模型支持直接生图则继承该模型。
+ * advisor：顾问模型（executor-advisor 模式）——主循环模型可用 `advisor` 工具向它
+ *   单次咨询；为空 = 功能关闭（工具不注册），没有继承语义。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DefaultModelsConfig {
+    #[serde(default)]
+    pub chat: DefaultModelSelection,
+    #[serde(default)]
+    pub vision: DefaultModelSelection,
+    #[serde(default)]
+    pub title_summary: DefaultModelSelection,
+    #[serde(default)]
+    pub compression: DefaultModelSelection,
+    #[serde(default)]
+    pub image_generation: DefaultModelSelection,
+    #[serde(default)]
+    pub advisor: DefaultModelSelection,
+}
+
+impl Default for DefaultModelsConfig {
+    fn default() -> Self {
+        Self {
+            chat: DefaultModelSelection::default(),
+            vision: DefaultModelSelection::default(),
+            title_summary: DefaultModelSelection::default(),
+            compression: DefaultModelSelection::default(),
+            image_generation: DefaultModelSelection::default(),
+            advisor: DefaultModelSelection::default(),
+        }
+    }
+}
+
+/// 解析 Chat 使用的响应语言代码。
+pub fn resolve_chat_language(settings: &Settings) -> String {
+    if !settings.chat.default_language.trim().is_empty() {
+        return settings.chat.default_language.trim().to_string();
+    }
+    if !settings.lens.default_language.trim().is_empty() {
+        return settings.lens.default_language.trim().to_string();
+    }
+    match settings.target_lang.as_str() {
+        "en" => "en".to_string(),
+        "zh-Hant" | "zh-TW" => "zh-Hant".to_string(),
+        _ => "zh".to_string(),
+    }
+}
+
+/**
+ * Chat MCP stdio server 配置。
+ *
+ * settings.json 使用 camelCase；env 与 API keys 一样按本地明文设置策略保存。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatMcpServer {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub transport: String,
+    pub url: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub headers: std::collections::HashMap<String, String>,
+    pub cwd: Option<String>,
+    pub enabled_tools: Vec<String>,
+    /// 连接器目录 id（如 "github"/"notion"/"composio" 或 "custom-xxx"）。
+    /// 非空表示这条 server 由「连接器」页管理，不在 MCP 页重复展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// 连接器认证信息。Phase A 只用 `{ kind: "token" }`；OAuth 字段留待 Phase B。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ConnectorAuth>,
+}
+
+impl Default for ChatMcpServer {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            enabled: false,
+            transport: "stdio".to_string(),
+            url: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            connector_id: None,
+            auth: None,
+        }
+    }
+}
+
+/**
+ * 连接器认证信息。与 `providers[].apiKeys` 一样按本地明文设置策略保存。
+ *
+ * Phase A 仅使用 `kind: "token"` + `access_token`；其余字段（refresh/expires/
+ * token_endpoint/client_id/scopes）为 Phase B 的 OAuth 流程预留。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ConnectorAuth {
+    pub kind: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<i64>,
+    pub token_endpoint: Option<String>,
+    pub client_id: Option<String>,
+    pub scopes: Vec<String>,
+    /// 真实账户标识（邮箱 / 工作区名 / 用户名），授权时尽力提取，拿不到则 None。
+    /// 明文存储，向后兼容（旧设置无此字段时反序列化为 None）。
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatNativeToolsConfig {
+    pub web_search: bool,
+    #[serde(default)]
+    pub web_fetch: bool,
+    pub skill_runtime: bool,
+    #[serde(default)]
+    pub read_file: bool,
+    #[serde(default)]
+    pub write_file: bool,
+    #[serde(default)]
+    pub edit_file: bool,
+    #[serde(default)]
+    pub run_command: bool,
+    #[serde(default)]
+    pub run_python: bool,
+    #[serde(default = "default_true")]
+    pub knowledge_search: bool,
+    /// Default root for ordinary (non-project) conversation workbenches.
+    /// Missing legacy configs deserialize to an empty string so sanitize can
+    /// migrate `workspace_roots[0]` before falling back to the platform default.
+    #[serde(default)]
+    pub working_directory: String,
+    /// Legacy compatibility only. Runtime code must not use this as a path boundary.
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
+}
+
+impl ChatNativeToolsConfig {
+    pub fn any_enabled(&self) -> bool {
+        self.web_search
+            || self.web_fetch
+            || self.skill_runtime
+            || self.read_file
+            || self.write_file
+            || self.edit_file
+            || self.run_command
+            || self.run_python
+            || self.knowledge_search
+    }
+}
+
+impl Default for ChatNativeToolsConfig {
+    fn default() -> Self {
+        // Agentic-app baseline: native tools are ON by default. Reading files and
+        // running commands are table stakes for the agent (and its sub-agents),
+        // not opt-in extras. Safety lives at execution time in the session-consent
+        // gate (chat/agent/execute.rs), which the UI lets cautious users tighten
+        // back to per-conversation confirmation. web_search still only surfaces
+        // when a provider key is configured.
+        Self {
+            web_search: true,
+            web_fetch: true,
+            skill_runtime: true,
+            read_file: true,
+            write_file: true,
+            edit_file: true,
+            run_command: true,
+            run_python: true,
+            knowledge_search: true,
+            working_directory: default_chat_working_directory(),
+            workspace_roots: Vec::new(),
+        }
+    }
+}
+
+pub fn default_chat_working_directory() -> String {
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join("Beefex").join("workspace"))
+        .unwrap_or_else(|| std::path::PathBuf::from("Beefex").join("workspace"))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn default_skill_auto_match() -> bool {
+    true
+}
+
+fn default_skill_fallback_mode() -> String {
+    "progressive".to_string()
+}
+
+pub const CHAT_TOOL_MIN_TIMEOUT_MS: u64 = 1_000;
+pub const CHAT_TOOL_MAX_TIMEOUT_MS: u64 = 300_000;
+pub const CHAT_TOOL_DEFAULT_ROUNDS: u32 = 20;
+pub const CHAT_TOOL_MIN_ROUNDS: u32 = 1;
+pub const CHAT_TOOL_MAX_ROUNDS: u32 = 100;
+/// 单条工具结果字符上限的合法区间。低于下限会把编译错误/测试输出截到没意义；
+/// 高于上限则失去"防上下文撑爆"的作用。`None`（不截断）由 sanitize 归一到默认值。
+pub const CHAT_TOOL_MIN_OUTPUT_CHARS: usize = 2_000;
+pub const CHAT_TOOL_MAX_OUTPUT_CHARS: usize = 200_000;
+/// 默认单条工具结果字符上限 ≈ 6K token（头 1/2 + 尾 1/4 保留约 3/4）。
+pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
+/// Orchestrate 模式下的最低工具轮次预算：编排者主动 fan-out 子 agent + 先规划再分派，
+/// 单条用户消息内可能需要更多轮次，因此抬到 max(用户配置, 此值)，但不放开为无限。
+pub const ORCHESTRATE_MIN_TOOL_ROUNDS: u32 = 40;
+/// MCP 持久连接空闲超时下限：太小会让长连接频繁回收失去意义。
+pub const MCP_IDLE_TIMEOUT_MIN_MS: u64 = 60_000;
+/// MCP 持久连接空闲超时上限：避免死连接长期占用子进程。
+pub const MCP_IDLE_TIMEOUT_MAX_MS: u64 = 24 * 60 * 60 * 1_000;
+
+fn default_chat_tool_timeout_ms() -> u64 {
+    60_000
+}
+
+fn default_sub_agent_concurrency() -> usize {
+    crate::chat::sub_agent::DEFAULT_SUB_AGENT_CONCURRENCY
+}
+
+fn default_mcp_idle_timeout_ms() -> u64 {
+    600_000
+}
+
+fn default_chat_max_tool_rounds() -> Option<u32> {
+    Some(CHAT_TOOL_DEFAULT_ROUNDS)
+}
+
+/// 单条工具结果进入上下文前的字符上限（头 1/2 + 尾 1/4 保留，实际约 3/4）。
+/// 默认 [`DEFAULT_MAX_TOOL_OUTPUT_CHARS`]：从源头掐住 read_file / bash / grep 等大输出，
+/// 避免它们以全量累积进 runtime_messages 撑爆上下文。`None` = 不截断（旧行为，sanitize 会归一到默认）。
+fn default_max_tool_output_chars() -> Option<usize> {
+    Some(DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+}
+
+fn default_chat_approval_policy() -> String {
+    // Green-light by default: file/shell tools run without a per-conversation
+    // prompt. The consent mechanism stays available — the UI can switch this to
+    // "always_confirm" or the per-conversation prompt for cautious users.
+    "auto".to_string()
+}
+
+/// The pre-green-light default. `sanitize_settings`' one-shot migration only
+/// flips an existing install to "auto" when its stored policy still equals this
+/// string, so a user who deliberately chose another policy is never stomped.
+const LEGACY_DEFAULT_APPROVAL_POLICY: &str = "readonly_auto_sensitive_confirm";
+
+/**
+ * Chat 工具与 Skill 配置。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatToolsConfig {
+    pub enabled: bool,
+    pub servers: Vec<ChatMcpServer>,
+    pub skill_scan_paths: Vec<String>,
+    #[serde(default = "default_skill_auto_match")]
+    pub skill_auto_match: bool,
+    #[serde(default = "default_skill_fallback_mode")]
+    pub skill_fallback_mode: String,
+    /// Skill ids the user turned off in Settings. Omitted ids are enabled.
+    #[serde(default)]
+    pub disabled_skill_ids: Vec<String>,
+    #[serde(default = "default_chat_max_tool_rounds")]
+    pub max_tool_rounds: Option<u32>,
+    #[serde(default = "default_chat_tool_timeout_ms")]
+    pub tool_timeout_ms: u64,
+    /// MCP 持久连接空闲超时（ms）：会话 last_used 超过此值后被 reaper 回收，下次调用透明重连。
+    #[serde(default = "default_mcp_idle_timeout_ms")]
+    pub mcp_idle_timeout_ms: u64,
+    #[serde(default = "default_max_tool_output_chars")]
+    pub max_tool_output_chars: Option<usize>,
+    #[serde(default = "default_chat_approval_policy")]
+    pub approval_policy: String,
+    /// 同一时刻最多并行运行的子 agent 数。受 [`SUB_AGENT_CONCURRENCY_MIN`]..[`MAX`] 钳制。
+    #[serde(default = "default_sub_agent_concurrency")]
+    pub sub_agent_concurrency: usize,
+    /// 子代理全局模型覆盖：spawn 的 sub-agent 用这个 provider+model 而非父会话的。
+    /// 两者皆空 = 跟随父会话（现状）。agent 定义文件里的 model 字段仍优先于此设置。
+    #[serde(default)]
+    pub sub_agent_provider_id: String,
+    #[serde(default)]
+    pub sub_agent_model: String,
+    /// 开发者「请求调试」总开关：开启后每次 provider 调用被记录到内存环形缓冲（脱敏）。
+    /// 默认关闭；关闭时 adapter 零开销（不构造记录）。仅内存、不落盘。
+    #[serde(default)]
+    pub request_debug_enabled: bool,
+    pub native_tools: ChatNativeToolsConfig,
+}
+
+impl Default for ChatToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            servers: Vec::new(),
+            skill_scan_paths: Vec::new(),
+            skill_auto_match: default_skill_auto_match(),
+            skill_fallback_mode: default_skill_fallback_mode(),
+            disabled_skill_ids: Vec::new(),
+            max_tool_rounds: default_chat_max_tool_rounds(),
+            tool_timeout_ms: default_chat_tool_timeout_ms(),
+            mcp_idle_timeout_ms: default_mcp_idle_timeout_ms(),
+            max_tool_output_chars: default_max_tool_output_chars(),
+            approval_policy: default_chat_approval_policy(),
+            sub_agent_concurrency: default_sub_agent_concurrency(),
+            sub_agent_provider_id: String::new(),
+            sub_agent_model: String::new(),
+            request_debug_enabled: false,
+            native_tools: ChatNativeToolsConfig::default(),
+        }
+    }
+}
+
+/// 第三方文档解析服务（MinerU / Doc2X / LlamaParse / 自定义端点）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DocProcessorProvider {
+    pub id: String,
+    pub name: String,
+    /// "mineru" | "doc2x" | "llamaparse" | "custom"
+    pub kind: String,
+    pub api_keys: Vec<String>,
+    pub base_url: String,
+    pub enabled: bool,
+}
+
+/// 知识库文档处理：Kivio 内置解析 + 可选第三方解析服务及路由策略。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DocumentProcessingConfig {
+    /// 图片/可 OCR 内容用的引擎: "off"(默认) | "system" | "rapid_ocr"
+    pub ocr_engine: String,
+    /// RapidOCR 模型档位:"standard"(PP-OCRv5 mobile) | "high"(默认,PP-OCRv6 medium)。
+    /// 知识库入库不在乎慢、要识别质量,故默认高精度。仅在 ocr_engine = "rapid_ocr" 时生效。
+    #[serde(default = "default_rapid_ocr_tier_high")]
+    pub rapid_ocr_tier: String,
+    /// PDF 处理: "text"(默认,文字层) | "force_ocr"(扫描版重扫——内置未启用,会报错)
+    pub pdf_strategy: String,
+    /// "" = Kivio 内置（本地 Rust）；否则为某第三方 provider id
+    pub active_processor: String,
+    /// 内置解析失败（如扫描版 PDF）时自动回退到第一个启用的第三方服务。
+    pub fallback_to_third_party: bool,
+    pub providers: Vec<DocProcessorProvider>,
+}
+
+impl Default for DocumentProcessingConfig {
+    fn default() -> Self {
+        Self {
+            ocr_engine: "off".into(),
+            rapid_ocr_tier: default_rapid_ocr_tier_high(),
+            pdf_strategy: "text".into(),
+            active_processor: String::new(),
+            fallback_to_third_party: false,
+            providers: Vec::new(),
+        }
+    }
+}
+
+/// 知识库检索配置：hybrid(向量+关键词 RRF) 权重 + 可选全局 rerank。
+/// 只配 embedding 即可用：hybrid 免配可关，rerank 留空即关、失败降级。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KnowledgeBaseConfig {
+    /// 是否启用关键词(BM25)+向量 hybrid 融合（关掉=纯向量）。
+    pub hybrid_enabled: bool,
+    /// RRF 融合权重（hybrid 开启时生效）。
+    pub weight_vector: f32,
+    pub weight_keyword: f32,
+    /// 全局 rerank：留空即关闭。provider 引用 providers[]，model 为该 provider 的 rerank 模型。
+    pub rerank_provider_id: String,
+    pub rerank_model: String,
+    /// 入库分块目标 tokens（使用处 clamp 到 256..=8192；只影响新导入/重建）。
+    pub chunk_tokens: u32,
+    /// knowledge_search 默认返回片段数（使用处 clamp 到 1..=20；工具入参可覆盖）。
+    pub top_k: u32,
+}
+
+impl Default for KnowledgeBaseConfig {
+    fn default() -> Self {
+        Self {
+            hybrid_enabled: true,
+            weight_vector: 1.0,
+            weight_keyword: 1.0,
+            rerank_provider_id: String::new(),
+            rerank_model: String::new(),
+            chunk_tokens: 480,
+            top_k: 5,
+        }
+    }
+}
+
+fn default_imap_port() -> u16 {
+    993
+}
+
+fn default_smtp_port() -> u16 {
+    587
+}
+
+fn default_imap_encryption() -> String {
+    "tls".to_string()
+}
+
+fn default_smtp_encryption() -> String {
+    "start-tls".to_string()
+}
+
+/// Himalaya 邮箱账户（IMAP 读 + SMTP 发）；凭据明文存 settings，同步到 ~/.config/himalaya/config.toml。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EmailAccountConfig {
+    /// TOML `[accounts.<id>]` 段名；空时由 email 推导。
+    pub id: String,
+    pub email: String,
+    pub display_name: String,
+    pub password: String,
+    pub imap_host: String,
+    #[serde(default = "default_imap_port")]
+    pub imap_port: u16,
+    #[serde(default = "default_imap_encryption")]
+    pub imap_encryption: String,
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default = "default_smtp_encryption")]
+    pub smtp_encryption: String,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+impl Default for EmailAccountConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            email: String::new(),
+            display_name: String::new(),
+            password: String::new(),
+            imap_host: String::new(),
+            imap_port: default_imap_port(),
+            imap_encryption: default_imap_encryption(),
+            smtp_host: String::new(),
+            smtp_port: default_smtp_port(),
+            smtp_encryption: default_smtp_encryption(),
+            is_default: false,
+        }
+    }
+}
+
+pub fn email_account_id_from_address(email: &str) -> String {
+    let slug: String = email
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 注入系统提示：已配置的 Himalaya 邮箱列表。
+pub fn email_accounts_system_prompt(
+    accounts: &[EmailAccountConfig],
+    himalaya_binary: Option<&str>,
+) -> Option<String> {
+    if accounts.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = accounts
+        .iter()
+        .map(|account| {
+            let id = if account.id.trim().is_empty() {
+                email_account_id_from_address(&account.email)
+            } else {
+                account.id.trim().to_string()
+            };
+            format!("- {} (account id: {id})", account.email.trim())
+        })
+        .collect();
+    let binary_line = himalaya_binary
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| format!("Himalaya binary: {path}"));
+    Some(format!(
+        "Configured mailboxes (Himalaya CLI — activate the himalaya skill and use run_command):\n{}\nUse Himalaya installed via the Kivio Email connector, or a system PATH himalaya binary.{}{}",
+        lines.join("\n"),
+        binary_line
+            .as_ref()
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default(),
+        "\nConfirm with the user before sending, deleting, or bulk-moving mail."
+    ))
+}
+
+/**
+ * 应用完整设置
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Settings {
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+    /// 打开 AI 客户端（chat 窗口）的全局热键。
+    #[serde(default = "default_chat_hotkey")]
+    pub chat_hotkey: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_theme_color")]
+    pub theme_color: String,
+    #[serde(default = "default_target_lang")]
+    pub target_lang: String,
+    #[serde(default = "default_true")]
+    pub auto_paste: bool,
+    #[serde(default = "default_false")]
+    pub launch_at_startup: bool,
+    #[serde(default)]
+    pub translator_provider_id: String,
+    #[serde(default = "default_openai_model")]
+    pub translator_model: String,
+    #[serde(default)]
+    pub chat_provider_id: String,
+    #[serde(default)]
+    pub chat_model: String,
+    #[serde(default)]
+    pub default_models: DefaultModelsConfig,
+    #[serde(default)]
+    pub translator_prompt: Option<String>,
+    #[serde(default)]
+    pub providers: Vec<ModelProvider>,
+    #[serde(default)]
+    pub screenshot_translation: ScreenshotTranslationConfig,
+    #[serde(default, alias = "cowork")]
+    pub lens: LensConfig,
+    #[serde(default)]
+    pub chat: ChatConfig,
+    #[serde(default)]
+    pub chat_memory: ChatMemoryConfig,
+    #[serde(default)]
+    pub chat_tools: ChatToolsConfig,
+    #[serde(default)]
+    pub document_processing: DocumentProcessingConfig,
+    #[serde(default)]
+    pub knowledge_base: KnowledgeBaseConfig,
+    /// 一次性：将 Lens 的流式/思考开关复制到独立的 Chat 配置（旧版共用 Lens 行为）。
+    #[serde(default)]
+    pub chat_behavior_migrated_from_lens: bool,
+    #[serde(default = "default_settings_language")]
+    pub settings_language: Option<String>,
+    #[serde(default = "default_retry_enabled")]
+    pub retry_enabled: bool,
+    #[serde(default = "default_retry_attempts")]
+    pub retry_attempts: u8,
+    /// 一次性迁移标记：内置专家（写作/编程/研究/数据）已 seed 进 assistants.json 后置 true。
+    /// 该迁移会清空整个助手索引（含用户自建——用户明确选择）再装入这 4 个内置专家，
+    /// 仅在首次启动跑一次；之后用户新建/删除专家不受影响。
+    #[serde(default)]
+    pub builtin_assistants_seeded_v1: bool,
+    /// 一次性迁移标记（v2，非破坏性）：按 id upsert 新一批内置专家（升级 4 个 + 新增前端/翻译/文档），
+    /// 更新旧内置、补齐新增，**保留用户自建**。已 seed v1 的老用户靠它拿到新专家；置 true 后不再跑。
+    #[serde(default)]
+    pub builtin_assistants_seeded_v2: bool,
+    /// 一次性迁移标记：把 pre-green-light 安装（原生工具默认全关 + 旧 approval_policy）
+    /// 带到新默认——原生文件/命令工具置 true，且仅当 approval_policy 仍是旧默认时改 "auto"。
+    /// 幂等：置 true 后不再翻转，尊重用户此后手动关闭某工具或改 policy 的选择。
+    #[serde(default)]
+    pub chat_tools_greenlit_v1: bool,
+    /// 首次使用引导状态：`pending` | `completed` | `skipped`。
+    /// 缺省为空字符串：老版本无此字段时由 `normalize_onboarding_status` 按是否已有 provider 决定。
+    #[serde(default)]
+    pub onboarding_status: String,
+    /// 启动时静默检查 Beefex Releases 是否有新版。Internal alpha 默认关闭，
+    /// 且只有编译时显式配置 BEEFEX_UPDATE_REPO 的 release build 才有更新源。
+    #[serde(default = "default_false")]
+    pub auto_check_update: bool,
+    /// 截图自动归档开关（默认 false）
+    #[serde(default = "default_false")]
+    pub image_archive_enabled: bool,
+    /// 自动归档目标目录路径（空字符串表示未设置）
+    #[serde(default)]
+    pub image_archive_path: String,
+    /// 用户 Obsidian 笔记库本地路径（空表示未配置）；注入系统提示供 agent 读取笔记。
+    #[serde(default)]
+    pub obsidian_vault_path: String,
+    /// 收藏并置顶的模型键（"providerId:model"）；列表顺序即置顶顺序。
+    /// 只在 chat 模型选择器里展示为顶部"收藏"组；失效项（provider 删/禁用/模型没了）展示时过滤。
+    #[serde(default)]
+    pub favorite_models: Vec<String>,
+    /// IMAP/SMTP 邮箱（Himalaya）；保存时同步到 ~/.config/himalaya/config.toml。
+    #[serde(default)]
+    pub email_accounts: Vec<EmailAccountConfig>,
+    // 旧版字段，用于迁移
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAIConfig>,
+}
+
+impl Settings {
+    /**
+     * 根据 ID 查找提供商
+     */
+    pub fn get_provider(&self, id: &str) -> Option<&ModelProvider> {
+        self.providers.iter().find(|p| p.id == id)
+    }
+
+    pub fn effective_chat_model(&self) -> (String, String) {
+        if self.default_models.chat.is_configured() {
+            return (
+                self.default_models.chat.provider_id.clone(),
+                self.default_models.chat.model.clone(),
+            );
+        }
+        if !self.lens.provider_id.trim().is_empty() {
+            return (self.lens.provider_id.clone(), self.lens.model.clone());
+        }
+        (
+            self.translator_provider_id.clone(),
+            self.translator_model.clone(),
+        )
+    }
+
+    pub fn effective_title_summary_model_for_session(
+        &self,
+        session: Option<SessionModel<'_>>,
+    ) -> (String, String) {
+        resolve_mixer_side_model(&self.default_models.title_summary, session, self)
+    }
+
+    pub fn has_explicit_vision_model(&self) -> bool {
+        self.default_models.vision.is_configured()
+    }
+
+    pub fn effective_vision_model(&self) -> (String, String) {
+        self.effective_vision_model_for_session(None)
+    }
+
+    pub fn effective_vision_model_for_session(
+        &self,
+        session: Option<SessionModel<'_>>,
+    ) -> (String, String) {
+        resolve_mixer_side_model(&self.default_models.vision, session, self)
+    }
+
+    pub fn effective_compression_model_for_session(
+        &self,
+        session: Option<SessionModel<'_>>,
+    ) -> (String, String) {
+        resolve_mixer_side_model(&self.default_models.compression, session, self)
+    }
+
+    pub fn image_generation_model(&self) -> Option<(String, String)> {
+        if self.default_models.image_generation.is_configured()
+            && !self.default_models.image_generation.model.trim().is_empty()
+        {
+            Some((
+                self.default_models.image_generation.provider_id.clone(),
+                self.default_models.image_generation.model.clone(),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Advisor model (executor-advisor pattern): the `advisor` tool is exposed
+    /// only when both provider and model are set. No inheritance — blank = off.
+    pub fn advisor_model(&self) -> Option<(String, String)> {
+        if self.default_models.advisor.is_configured()
+            && !self.default_models.advisor.model.trim().is_empty()
+        {
+            Some((
+                self.default_models.advisor.provider_id.clone(),
+                self.default_models.advisor.model.clone(),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            hotkey: "CommandOrControl+Alt+T".to_string(),
+            chat_hotkey: "CommandOrControl+Shift+K".to_string(),
+            theme: "system".to_string(),
+            theme_color: default_theme_color(),
+            target_lang: "auto".to_string(),
+            auto_paste: true,
+            launch_at_startup: false,
+            translator_provider_id: "default-translator".to_string(),
+            translator_model: "gpt-4o".to_string(),
+            chat_provider_id: String::new(),
+            chat_model: String::new(),
+            default_models: DefaultModelsConfig::default(),
+            translator_prompt: None,
+            providers: vec![],
+            screenshot_translation: ScreenshotTranslationConfig::default(),
+            lens: LensConfig::default(),
+            chat: ChatConfig::default(),
+            chat_memory: ChatMemoryConfig::default(),
+            chat_tools: ChatToolsConfig::default(),
+            document_processing: DocumentProcessingConfig::default(),
+            knowledge_base: KnowledgeBaseConfig::default(),
+            chat_behavior_migrated_from_lens: false,
+            settings_language: Some("zh".to_string()),
+            retry_enabled: default_retry_enabled(),
+            retry_attempts: default_retry_attempts(),
+            builtin_assistants_seeded_v1: false,
+            builtin_assistants_seeded_v2: false,
+            chat_tools_greenlit_v1: false,
+            onboarding_status: default_onboarding_status(),
+            auto_check_update: false,
+            image_archive_enabled: false,
+            image_archive_path: String::new(),
+            obsidian_vault_path: String::new(),
+            favorite_models: Vec::new(),
+            email_accounts: Vec::new(),
+            openai: None,
+        }
+    }
+}
+
+/**
+ * 设置数据清理与迁移
+ *
+ * 执行以下操作：
+ * 1. 从旧版单提供商配置迁移到多提供商体系
+ * 2. 确保空 provider 字段有默认值
+ * 3. 如果当前模型不在 enabled_models 中则清空或切到第一个启用模型
+ * 4. 规范化快捷键字符串
+ * 5. 确保必要字段不为空
+ */
+pub fn chat_native_tools_enabled(chat_tools: &ChatToolsConfig) -> bool {
+    chat_tools.native_tools.any_enabled()
+}
+
+pub fn chat_memory_tools_enabled(settings: &Settings) -> bool {
+    settings.chat_memory.enabled
+}
+
+pub fn chat_image_generation_enabled_for_session(
+    settings: &Settings,
+    session: Option<SessionModel<'_>>,
+) -> bool {
+    crate::chat::model_metadata::image_generation_model_for_session(settings, session).is_some()
+}
+
+pub fn is_skill_enabled(chat_tools: &ChatToolsConfig, skill_id: &str) -> bool {
+    let skill_id = skill_id.trim();
+    if skill_id.is_empty() {
+        return false;
+    }
+    !chat_tools
+        .disabled_skill_ids
+        .iter()
+        .any(|disabled| disabled == skill_id)
+}
+
+/// Bundled skill id for the email (Himalaya) connector — hidden until configured.
+pub const EMAIL_CONNECTOR_SKILL_ID: &str = "himalaya";
+
+/// Bundled skill ids for the Obsidian connector — hidden until a vault path is
+/// configured. Adapted from kepano/obsidian-skills (see resources/skills/NOTICE.md).
+pub const OBSIDIAN_CONNECTOR_SKILL_IDS: &[&str] = &[
+    "obsidian-markdown",
+    "obsidian-bases",
+    "json-canvas",
+    "obsidian-cli",
+];
+
+pub fn email_connector_configured(accounts: &[EmailAccountConfig]) -> bool {
+    !accounts.is_empty()
+}
+
+/// The Obsidian connector is "configured" once a vault path is set.
+pub fn obsidian_connector_configured(vault_path: &str) -> bool {
+    !vault_path.trim().is_empty()
+}
+
+/// Connector-backed skills stay unavailable until their connector is configured.
+pub fn skill_connector_satisfied(
+    skill_id: &str,
+    email_accounts: &[EmailAccountConfig],
+    obsidian_vault_configured: bool,
+) -> bool {
+    if skill_id == EMAIL_CONNECTOR_SKILL_ID {
+        return email_connector_configured(email_accounts);
+    }
+    if OBSIDIAN_CONNECTOR_SKILL_IDS.contains(&skill_id) {
+        return obsidian_vault_configured;
+    }
+    true
+}
+
+/// Global skill gate: Settings enable list + connector prerequisites + 插件门闸。
+/// 插件附属 skill（如 officecli）仅在对应插件「已安装且启用」时可用。
+pub fn skill_globally_available(
+    chat_tools: &ChatToolsConfig,
+    skill_id: &str,
+    email_accounts: &[EmailAccountConfig],
+    obsidian_vault_configured: bool,
+) -> bool {
+    if !crate::plugins::plugin_skill_available(skill_id) {
+        return false;
+    }
+    is_skill_enabled(chat_tools, skill_id)
+        && skill_connector_satisfied(skill_id, email_accounts, obsidian_vault_configured)
+}
+
+/// When [`skill_globally_available`] is false, returns a loop/UI-friendly error.
+pub fn skill_global_unavailable_error(
+    chat_tools: &ChatToolsConfig,
+    skill_id: &str,
+    email_accounts: &[EmailAccountConfig],
+    obsidian_vault_configured: bool,
+    skill_name: &str,
+) -> Option<String> {
+    if !crate::plugins::plugin_skill_available(skill_id) {
+        if let Some(plugin_id) = crate::plugins::skill_owned_by_plugin(skill_id) {
+            return Some(format!(
+                "Skill is managed by plugin «{plugin_id}» — enable it in 扩展 → 插件: {skill_name}"
+            ));
+        }
+        return Some(format!("Skill is unavailable: {skill_name}"));
+    }
+    if !is_skill_enabled(chat_tools, skill_id) {
+        return Some(format!("Skill is disabled in Settings: {skill_name}"));
+    }
+    if !skill_connector_satisfied(skill_id, email_accounts, obsidian_vault_configured) {
+        if skill_id == EMAIL_CONNECTOR_SKILL_ID {
+            return Some(format!(
+                "Skill requires a configured email connector: {skill_name}"
+            ));
+        }
+        return Some(format!(
+            "Skill requires a configured Obsidian connector: {skill_name}"
+        ));
+    }
+    None
+}
+
+fn sanitize_default_model_selection(
+    selection: &mut DefaultModelSelection,
+    providers: &[ModelProvider],
+) {
+    selection.provider_id = selection.provider_id.trim().to_string();
+    selection.model = selection.model.trim().to_string();
+    if selection.provider_id.is_empty() {
+        selection.model.clear();
+        return;
+    }
+
+    let Some(provider) = providers
+        .iter()
+        .find(|p| p.id == selection.provider_id && p.enabled)
+    else {
+        selection.provider_id.clear();
+        selection.model.clear();
+        return;
+    };
+
+    if !provider.enabled_models.is_empty() && !provider.enabled_models.contains(&selection.model) {
+        selection.model = provider.enabled_models.first().cloned().unwrap_or_default();
+    }
+}
+
+fn sync_legacy_chat_model_fields(settings: &mut Settings) {
+    let (provider_id, model) = settings.effective_chat_model();
+    settings.chat_provider_id = provider_id;
+    settings.chat_model = model;
+}
+
+fn mirror_explicit_chat_default_for_persistence(settings: &mut Settings) {
+    if settings.default_models.chat.is_configured() {
+        settings.chat_provider_id = settings.default_models.chat.provider_id.clone();
+        settings.chat_model = settings.default_models.chat.model.clone();
+    } else {
+        settings.chat_provider_id.clear();
+        settings.chat_model.clear();
+    }
+}
+
+fn sanitize_email_accounts(accounts: &mut Vec<EmailAccountConfig>) {
+    accounts.retain(|account| !account.email.trim().is_empty());
+    for account in accounts.iter_mut() {
+        account.email = account.email.trim().to_string();
+        account.display_name = account.display_name.trim().to_string();
+        account.password = account.password.trim().to_string();
+        account.imap_host = account.imap_host.trim().to_string();
+        account.smtp_host = account.smtp_host.trim().to_string();
+        account.imap_encryption = account.imap_encryption.trim().to_lowercase();
+        account.smtp_encryption = account.smtp_encryption.trim().to_lowercase();
+        if account.id.trim().is_empty() {
+            account.id = email_account_id_from_address(&account.email);
+        } else {
+            account.id = account
+                .id
+                .trim()
+                .to_lowercase()
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+                .trim_matches('-')
+                .to_string();
+        }
+        if account.id.is_empty() {
+            account.id = "default".to_string();
+        }
+        if account.display_name.is_empty() {
+            account.display_name = account.email.clone();
+        }
+        if account.imap_port == 0 {
+            account.imap_port = default_imap_port();
+        }
+        if account.smtp_port == 0 {
+            account.smtp_port = default_smtp_port();
+        }
+        if account.imap_encryption.is_empty() {
+            account.imap_encryption = default_imap_encryption();
+        }
+        if account.smtp_encryption.is_empty() {
+            account.smtp_encryption = default_smtp_encryption();
+        }
+    }
+    if accounts.len() == 1 {
+        accounts[0].is_default = true;
+    }
+    if !accounts.is_empty() && !accounts.iter().any(|account| account.is_default) {
+        accounts[0].is_default = true;
+    }
+}
+
+pub fn sanitize_settings(mut settings: Settings) -> Settings {
+    // RapidOCR 档位归一:非法值回落到各自默认(截图=standard,文档处理=high)。
+    if settings.screenshot_translation.rapid_ocr_tier != "standard"
+        && settings.screenshot_translation.rapid_ocr_tier != "high"
+    {
+        settings.screenshot_translation.rapid_ocr_tier = default_rapid_ocr_tier();
+    }
+    if settings.document_processing.rapid_ocr_tier != "standard"
+        && settings.document_processing.rapid_ocr_tier != "high"
+    {
+        settings.document_processing.rapid_ocr_tier = default_rapid_ocr_tier_high();
+    }
+    // 1. 从旧版配置迁移
+    if settings.providers.is_empty() {
+        // 迁移翻译提供商
+        if let Some(old_openai) = settings.openai.take() {
+            let legacy_key = old_openai.api_key.trim().to_string();
+            let api_keys = if legacy_key.is_empty() {
+                vec![]
+            } else {
+                vec![legacy_key]
+            };
+            settings.providers.push(ModelProvider {
+                id: "default-translator".to_string(),
+                name: "OpenAI (Translator)".to_string(),
+                api_keys,
+                api_key_legacy: None,
+                base_url: old_openai.base_url,
+                available_models: vec![],
+                enabled_models: vec![old_openai.model.clone()],
+                enabled: true,
+                api_format: "openai".to_string(),
+                model_overrides: std::collections::HashMap::new(),
+                compress_request_body: false,
+            });
+            settings.translator_provider_id = "default-translator".to_string();
+            settings.translator_model = old_openai.model;
+        }
+        // 迁移 OCR 提供商
+        if let Some(old_ocr) = settings.screenshot_translation.openai.take() {
+            let legacy_key = old_ocr.api_key.trim().to_string();
+            let api_keys = if legacy_key.is_empty() {
+                vec![]
+            } else {
+                vec![legacy_key]
+            };
+            settings.providers.push(ModelProvider {
+                id: "default-ocr".to_string(),
+                name: "OpenAI (OCR)".to_string(),
+                api_keys,
+                api_key_legacy: None,
+                base_url: old_ocr.base_url,
+                available_models: vec![],
+                enabled_models: vec![old_ocr.model.clone()],
+                enabled: true,
+                api_format: "openai".to_string(),
+                model_overrides: std::collections::HashMap::new(),
+                compress_request_body: false,
+            });
+            settings.screenshot_translation.provider_id = "default-ocr".to_string();
+            settings.screenshot_translation.model = old_ocr.model;
+        }
+    }
+
+    // 1b. 单 key → 多 key 迁移（v2.3.1 → v2.4 升级路径）
+    for provider in &mut settings.providers {
+        if is_beefapi_url(&provider.base_url) {
+            provider.base_url = BEEFAPI_RESPONSES_BASE_URL.to_string();
+            provider.api_format = ProviderApiFormat::OpenAiResponses.as_str().to_string();
+        } else {
+            provider.api_format = provider.api_format_kind().as_str().to_string();
+        }
+        if let Some(legacy) = provider.api_key_legacy.take() {
+            let trimmed = legacy.trim().to_string();
+            if !trimmed.is_empty() && !provider.api_keys.contains(&trimmed) {
+                provider.api_keys.insert(0, trimmed);
+            }
+        }
+        // 去重 + 去空
+        let mut seen = std::collections::HashSet::new();
+        provider.api_keys.retain(|k| {
+            let trimmed = k.trim();
+            !trimmed.is_empty() && seen.insert(trimmed.to_string())
+        });
+    }
+
+    let removed_legacy_local_provider_ids: std::collections::HashSet<String> = settings
+        .providers
+        .iter()
+        .filter(|provider| provider.base_url == LEGACY_APPLE_INTELLIGENCE_BASE_URL)
+        .map(|provider| provider.id.clone())
+        .collect();
+    if !removed_legacy_local_provider_ids.is_empty() {
+        settings
+            .providers
+            .retain(|provider| provider.base_url != LEGACY_APPLE_INTELLIGENCE_BASE_URL);
+        let fallback = settings.providers.iter().find(|p| p.enabled).map(|p| {
+            (
+                p.id.clone(),
+                p.enabled_models.first().cloned().unwrap_or_default(),
+            )
+        });
+
+        if removed_legacy_local_provider_ids.contains(&settings.chat_provider_id) {
+            if let Some((id, model)) = fallback.as_ref() {
+                settings.chat_provider_id = id.clone();
+                settings.chat_model = model.clone();
+            } else {
+                settings.chat_provider_id.clear();
+                settings.chat_model.clear();
+            }
+        }
+        if removed_legacy_local_provider_ids.contains(&settings.translator_provider_id) {
+            if let Some((id, model)) = fallback.as_ref() {
+                settings.translator_provider_id = id.clone();
+                settings.translator_model = model.clone();
+            } else {
+                settings.translator_provider_id.clear();
+                settings.translator_model.clear();
+            }
+        }
+        if removed_legacy_local_provider_ids.contains(&settings.screenshot_translation.provider_id)
+        {
+            if let Some((id, model)) = fallback.as_ref() {
+                settings.screenshot_translation.provider_id = id.clone();
+                settings.screenshot_translation.model = model.clone();
+            } else {
+                settings.screenshot_translation.provider_id.clear();
+                settings.screenshot_translation.model.clear();
+            }
+        }
+        if !settings.lens.provider_id.is_empty()
+            && removed_legacy_local_provider_ids.contains(&settings.lens.provider_id)
+        {
+            settings.lens.provider_id.clear();
+            settings.lens.model.clear();
+        }
+        for selection in [
+            &mut settings.default_models.chat,
+            &mut settings.default_models.vision,
+            &mut settings.default_models.title_summary,
+            &mut settings.default_models.compression,
+            &mut settings.default_models.image_generation,
+        ] {
+            if removed_legacy_local_provider_ids.contains(&selection.provider_id) {
+                if let Some((id, model)) = fallback.as_ref() {
+                    selection.provider_id = id.clone();
+                    selection.model = model.clone();
+                } else {
+                    selection.provider_id.clear();
+                    selection.model.clear();
+                }
+            }
+        }
+    }
+
+    let provider_exists = |id: &str| settings.providers.iter().any(|p| p.id == id);
+    let provider_selectable = |id: &str| settings.providers.iter().any(|p| p.id == id && p.enabled);
+    let first_selectable_provider = || settings.providers.iter().find(|p| p.enabled);
+
+    // 2. 为空字段设置默认值
+    if settings.translator_provider_id.is_empty() {
+        if let Some(first) = first_selectable_provider() {
+            settings.translator_provider_id = first.id.clone();
+        }
+    }
+    if settings.screenshot_translation.provider_id.is_empty() {
+        if let Some(first) = first_selectable_provider() {
+            settings.screenshot_translation.provider_id = first.id.clone();
+        }
+    }
+    if !settings.chat_provider_id.trim().is_empty()
+        && settings.default_models.chat.provider_id.trim().is_empty()
+    {
+        settings.default_models.chat.provider_id = settings.chat_provider_id.clone();
+        settings.default_models.chat.model = settings.chat_model.clone();
+    }
+
+    if settings.providers.is_empty() {
+        settings.translator_provider_id.clear();
+        settings.default_models = DefaultModelsConfig::default();
+        settings.screenshot_translation.provider_id.clear();
+        settings.lens.provider_id.clear();
+        settings.chat_tools.sub_agent_provider_id.clear();
+        settings.chat_tools.sub_agent_model.clear();
+    } else {
+        if !provider_selectable(&settings.translator_provider_id) {
+            if let Some(first) = first_selectable_provider() {
+                settings.translator_provider_id = first.id.clone();
+                if let Some(model) = first.enabled_models.first() {
+                    settings.translator_model = model.clone();
+                }
+            } else if !provider_exists(&settings.translator_provider_id) {
+                settings.translator_provider_id.clear();
+                settings.translator_model.clear();
+            }
+        }
+        if !provider_selectable(&settings.screenshot_translation.provider_id) {
+            if let Some(first) = first_selectable_provider() {
+                settings.screenshot_translation.provider_id = first.id.clone();
+                if let Some(model) = first.enabled_models.first() {
+                    settings.screenshot_translation.model = model.clone();
+                }
+            } else if !provider_exists(&settings.screenshot_translation.provider_id) {
+                settings.screenshot_translation.provider_id.clear();
+                settings.screenshot_translation.model.clear();
+            }
+        }
+        // lens provider 可空（空时 call_vision_api 走 translator_provider_id fallback）；
+        // 但若用户填了一个不存在或已禁用的，重置为空让其走 fallback。
+        if !settings.lens.provider_id.is_empty()
+            && (!provider_exists(&settings.lens.provider_id)
+                || !provider_selectable(&settings.lens.provider_id))
+        {
+            settings.lens.provider_id.clear();
+            settings.lens.model.clear();
+        }
+
+        // 子代理模型覆盖可空（空 = 跟随父会话）；填了不存在/已禁用的 provider 则重置回跟随。
+        if !settings.chat_tools.sub_agent_provider_id.is_empty()
+            && !provider_selectable(&settings.chat_tools.sub_agent_provider_id)
+        {
+            settings.chat_tools.sub_agent_provider_id.clear();
+            settings.chat_tools.sub_agent_model.clear();
+        }
+
+        sanitize_default_model_selection(&mut settings.default_models.chat, &settings.providers);
+        sanitize_default_model_selection(&mut settings.default_models.vision, &settings.providers);
+        sanitize_default_model_selection(
+            &mut settings.default_models.title_summary,
+            &settings.providers,
+        );
+        sanitize_default_model_selection(
+            &mut settings.default_models.compression,
+            &settings.providers,
+        );
+        sanitize_default_model_selection(
+            &mut settings.default_models.image_generation,
+            &settings.providers,
+        );
+        sanitize_default_model_selection(&mut settings.default_models.advisor, &settings.providers);
+    }
+
+    // 3. 确保当前使用的模型确实在该 provider 的 enabled_models 中。
+    // enabled_models 可以为空：预设 provider 不再自带模型。
+    for provider in &mut settings.providers {
+        if settings.translator_provider_id == provider.id
+            && !provider.enabled_models.contains(&settings.translator_model)
+        {
+            settings.translator_model =
+                provider.enabled_models.first().cloned().unwrap_or_default();
+        }
+        if settings.screenshot_translation.provider_id == provider.id
+            && !provider
+                .enabled_models
+                .contains(&settings.screenshot_translation.model)
+        {
+            settings.screenshot_translation.model =
+                provider.enabled_models.first().cloned().unwrap_or_default();
+        }
+        if !settings.lens.provider_id.is_empty()
+            && settings.lens.provider_id == provider.id
+            && !settings.lens.model.is_empty()
+            && !provider.enabled_models.contains(&settings.lens.model)
+        {
+            settings.lens.model = provider.enabled_models.first().cloned().unwrap_or_default();
+        }
+    }
+
+    sync_legacy_chat_model_fields(&mut settings);
+
+    // 4. 规范化快捷键字符串
+    settings.hotkey = normalize_hotkey(&settings.hotkey);
+    settings.chat_hotkey = normalize_hotkey(&settings.chat_hotkey);
+    settings.screenshot_translation.hotkey =
+        normalize_hotkey(&settings.screenshot_translation.hotkey);
+    settings.screenshot_translation.text_hotkey =
+        normalize_hotkey(&settings.screenshot_translation.text_hotkey);
+    settings.screenshot_translation.replace_hotkey =
+        normalize_hotkey(&settings.screenshot_translation.replace_hotkey);
+    settings.lens.hotkey = normalize_hotkey(&settings.lens.hotkey);
+
+    // 规范化提示词（去除首尾空白，空值转为 None）
+    settings.translator_prompt = normalize_optional_prompt(settings.translator_prompt.take());
+    settings.screenshot_translation.prompt =
+        normalize_optional_prompt(settings.screenshot_translation.prompt.take());
+    settings.screenshot_translation.text_prompt =
+        normalize_optional_prompt(settings.screenshot_translation.text_prompt.take());
+    settings.screenshot_translation.replace_prompt =
+        normalize_optional_prompt(settings.screenshot_translation.replace_prompt.take());
+    // 翻译卡宽度单一真源：import / 手改 settings.json 也在此兜底到 360–720，
+    // 与 set_translate_card_size 命令、设置页输入框、Lens 缩放 clamp 同域。
+    settings.screenshot_translation.card_width =
+        settings.screenshot_translation.card_width.clamp(360, 720);
+
+    // 5. 其他字段验证
+    if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
+        settings.theme = default_theme();
+    }
+    if !matches!(settings.theme_color.as_str(), "neutral" | "warm" | "cool") {
+        settings.theme_color = default_theme_color();
+    }
+    if settings.lens.message_order != "asc" && settings.lens.message_order != "desc" {
+        settings.lens.message_order = "asc".to_string();
+    }
+    settings.lens.web_search.tavily_api_key =
+        settings.lens.web_search.tavily_api_key.trim().to_string();
+    settings.lens.web_search.exa_api_key = settings.lens.web_search.exa_api_key.trim().to_string();
+    settings.lens.web_search.ollama_api_key =
+        settings.lens.web_search.ollama_api_key.trim().to_string();
+    settings.lens.web_search.grok_api_key =
+        settings.lens.web_search.grok_api_key.trim().to_string();
+    settings.lens.web_search.grok_model = {
+        let trimmed = settings.lens.web_search.grok_model.trim();
+        if trimmed.is_empty() {
+            default_grok_model()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    settings.lens.web_search.grok_base_url = {
+        let trimmed = settings.lens.web_search.grok_base_url.trim();
+        if trimmed.is_empty() {
+            default_grok_base_url()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    if settings
+        .lens
+        .web_search
+        .grok_system_prompt
+        .trim()
+        .is_empty()
+    {
+        settings.lens.web_search.grok_system_prompt = default_grok_system_prompt();
+    }
+    settings.lens.web_search.exa_mcp_url = {
+        let trimmed = settings.lens.web_search.exa_mcp_url.trim();
+        if trimmed.is_empty() {
+            default_exa_mcp_url()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    // 未知/占位服务商回退到 Tavily，避免选中尚未接入的源导致搜索直接报错。
+    if matches!(
+        settings.lens.web_search.provider,
+        WebSearchProvider::Unknown
+    ) {
+        settings.lens.web_search.provider = WebSearchProvider::Tavily;
+    }
+    settings.lens.web_search.max_results = settings.lens.web_search.max_results.clamp(1, 10);
+    if !matches!(
+        settings.lens.web_search.search_depth.as_str(),
+        "ultra-fast" | "fast" | "basic" | "advanced"
+    ) {
+        settings.lens.web_search.search_depth = default_web_search_depth();
+    }
+
+    if !settings.chat_behavior_migrated_from_lens {
+        settings.chat.stream_enabled = settings.lens.stream_enabled;
+        settings.chat.thinking_enabled = settings.lens.thinking_enabled;
+        if settings.lens.default_language.trim().is_empty() {
+            // keep chat.default_language empty → inherit chain unchanged
+        } else {
+            settings.chat.default_language = settings.lens.default_language.clone();
+        }
+        settings.chat_behavior_migrated_from_lens = true;
+    }
+    if !matches!(
+        settings.chat.default_language.trim(),
+        "" | "zh" | "zh-Hant" | "en"
+    ) {
+        settings.chat.default_language.clear();
+    }
+    settings.chat.max_output_tokens = clamp_chat_max_output_tokens(settings.chat.max_output_tokens);
+    settings.chat.system_prompt = settings.chat.system_prompt.trim().to_string();
+
+    settings.chat_tools.max_tool_rounds = settings
+        .chat_tools
+        .max_tool_rounds
+        .map(|rounds| rounds.clamp(CHAT_TOOL_MIN_ROUNDS, CHAT_TOOL_MAX_ROUNDS));
+    settings.chat_tools.tool_timeout_ms = settings
+        .chat_tools
+        .tool_timeout_ms
+        .clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS);
+    settings.chat_tools.sub_agent_concurrency = settings.chat_tools.sub_agent_concurrency.clamp(
+        crate::chat::sub_agent::SUB_AGENT_CONCURRENCY_MIN,
+        crate::chat::sub_agent::SUB_AGENT_CONCURRENCY_MAX,
+    );
+    settings.chat_tools.mcp_idle_timeout_ms = settings
+        .chat_tools
+        .mcp_idle_timeout_ms
+        .clamp(MCP_IDLE_TIMEOUT_MIN_MS, MCP_IDLE_TIMEOUT_MAX_MS);
+    // 工具输出截断：None（旧的"不截断"）归一到默认值，Some 值钳到合法区间。
+    // 旧逻辑在此无条件置 None（等于永不截断 → 上下文撑爆主因），现改为始终保底截断。
+    settings.chat_tools.max_tool_output_chars = Some(
+        settings
+            .chat_tools
+            .max_tool_output_chars
+            .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+            .clamp(CHAT_TOOL_MIN_OUTPUT_CHARS, CHAT_TOOL_MAX_OUTPUT_CHARS),
+    );
+    if !matches!(
+        settings.chat_tools.approval_policy.trim(),
+        "readonly_auto_sensitive_confirm" | "always_confirm" | "auto"
+    ) {
+        settings.chat_tools.approval_policy = default_chat_approval_policy();
+    }
+    // One-shot green-light migration: bring a pre-green-light install (native
+    // tools defaulted OFF + old approval_policy) to the new baseline. Idempotent
+    // via `chat_tools_greenlit_v1` so a user who later turns a tool back off, or
+    // picks a stricter policy, is never re-flipped. The policy is only changed
+    // when it still equals the legacy default, so an explicit choice survives.
+    if !settings.chat_tools_greenlit_v1 {
+        let native = &mut settings.chat_tools.native_tools;
+        native.read_file = true;
+        native.write_file = true;
+        native.edit_file = true;
+        native.run_command = true;
+        native.run_python = true;
+        native.web_fetch = true;
+        native.web_search = true;
+        if settings.chat_tools.approval_policy == LEGACY_DEFAULT_APPROVAL_POLICY {
+            settings.chat_tools.approval_policy = "auto".to_string();
+        }
+        settings.chat_tools_greenlit_v1 = true;
+    }
+    settings.chat_tools.skill_scan_paths = settings
+        .chat_tools
+        .skill_scan_paths
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    if !matches!(
+        settings.chat_tools.skill_fallback_mode.trim(),
+        "progressive" | "skill_md_only" | "legacy_full_body"
+    ) {
+        settings.chat_tools.skill_fallback_mode = default_skill_fallback_mode();
+    }
+    settings.chat_tools.disabled_skill_ids = settings
+        .chat_tools
+        .disabled_skill_ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    settings.chat_tools.native_tools.workspace_roots = settings
+        .chat_tools
+        .native_tools
+        .workspace_roots
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    let mut seen_roots = std::collections::HashSet::new();
+    settings
+        .chat_tools
+        .native_tools
+        .workspace_roots
+        .retain(|path| seen_roots.insert(path.clone()));
+    settings.chat_tools.native_tools.working_directory = settings
+        .chat_tools
+        .native_tools
+        .working_directory
+        .trim()
+        .to_string();
+    if settings
+        .chat_tools
+        .native_tools
+        .working_directory
+        .is_empty()
+    {
+        settings.chat_tools.native_tools.working_directory = settings
+            .chat_tools
+            .native_tools
+            .workspace_roots
+            .first()
+            .cloned()
+            .unwrap_or_else(default_chat_working_directory);
+    }
+    // Persist only the new single-directory setting after legacy migration.
+    settings.chat_tools.native_tools.workspace_roots.clear();
+    for server in &mut settings.chat_tools.servers {
+        server.id = server.id.trim().to_string();
+        if server.id.is_empty() {
+            server.id = format!("mcp-{}", uuid::Uuid::new_v4());
+        }
+        server.name = server.name.trim().to_string();
+        if server.name.is_empty() {
+            server.name = server.id.clone();
+        }
+        server.transport = server.transport.trim().to_ascii_lowercase();
+        if server.transport == "http" || server.transport == "sse" {
+            server.transport = "streamable_http".to_string();
+        }
+        if server.transport != "stdio" && server.transport != "streamable_http" {
+            server.transport = "stdio".to_string();
+        }
+        server.url = server.url.trim().to_string();
+        server.command = server.command.trim().to_string();
+        server.args = server
+            .args
+            .iter()
+            .map(|arg| arg.trim().to_string())
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        server.env = server
+            .env
+            .iter()
+            .filter_map(|(key, value)| {
+                let key = key.trim();
+                if key.is_empty() {
+                    None
+                } else {
+                    Some((key.to_string(), value.clone()))
+                }
+            })
+            .collect();
+        server.headers = server
+            .headers
+            .iter()
+            .filter_map(|(key, value)| {
+                let key = key.trim();
+                if key.is_empty() {
+                    None
+                } else {
+                    Some((key.to_string(), value.trim().to_string()))
+                }
+            })
+            .collect();
+        server.cwd = server.cwd.take().and_then(|cwd| {
+            let trimmed = cwd.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        server.enabled_tools = server
+            .enabled_tools
+            .iter()
+            .map(|tool| tool.trim().to_string())
+            .filter(|tool| !tool.is_empty())
+            .collect();
+        // 连接器 id 去空白；空串归一为 None，使其退回普通 MCP server。
+        server.connector_id = server.connector_id.take().and_then(|cid| {
+            let trimmed = cid.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+    }
+
+    // 清理归档目录路径（去除首尾空白）
+    settings.image_archive_path = settings.image_archive_path.trim().to_string();
+    settings.obsidian_vault_path = settings.obsidian_vault_path.trim().to_string();
+    sanitize_email_accounts(&mut settings.email_accounts);
+
+    settings.retry_attempts = clamp_retry_attempts(settings.retry_attempts);
+
+    // 系统 OCR 依赖平台本地 OCR 能力（macOS Apple Vision / Windows.Media.Ocr）。其它平台
+    // 同步来的旧配置必须关闭，否则截图翻译会误入不可用分支。
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        settings.screenshot_translation.use_system_ocr = false;
+    }
+
+    // OCR 引擎模式迁移（vNext+）：
+    // 1. 反序列化兜底变体 OcrMode::Legacy（如旧版 "tesseract" 字符串）→ RapidOcr，
+    //    保留用户此前选择离线 OCR 的隐私边界；模型未下载时由前端引导下载。
+    // 2. 若 ocr_mode 缺省（老版本数据），按 use_system_ocr 反推：
+    //    true→System，false→CloudVision
+    // 3. Linux 不支持 System / RapidOcr，强制落回 CloudVision
+    if matches!(
+        settings.screenshot_translation.ocr_mode,
+        Some(OcrMode::Legacy)
+    ) {
+        settings.screenshot_translation.ocr_mode = Some(OcrMode::RapidOcr);
+    }
+    if settings.screenshot_translation.ocr_mode.is_none() {
+        settings.screenshot_translation.ocr_mode =
+            Some(if settings.screenshot_translation.use_system_ocr {
+                OcrMode::System
+            } else {
+                OcrMode::CloudVision
+            });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if matches!(
+            settings.screenshot_translation.ocr_mode,
+            Some(OcrMode::System) | Some(OcrMode::RapidOcr)
+        ) {
+            settings.screenshot_translation.ocr_mode = Some(OcrMode::CloudVision);
+        }
+    }
+
+    settings.onboarding_status = normalize_onboarding_status(&settings);
+
+    settings
+}
+
+pub(crate) fn is_beefapi_url(raw: &str) -> bool {
+    url::Url::parse(raw.trim()).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("beefapi.com")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+    })
+}
+
+fn default_onboarding_status() -> String {
+    "pending".to_string()
+}
+
+fn onboarding_status_is_set(raw: &str) -> bool {
+    matches!(raw.trim(), "pending" | "completed" | "skipped")
+}
+
+fn provider_has_usable_config(provider: &ModelProvider) -> bool {
+    provider.enabled
+        && provider.api_keys.iter().any(|k| !k.trim().is_empty())
+        && !provider.enabled_models.is_empty()
+}
+
+fn settings_has_usable_provider_config(settings: &Settings) -> bool {
+    settings.providers.iter().any(provider_has_usable_config)
+}
+
+fn normalize_onboarding_status(settings: &Settings) -> String {
+    let raw = settings.onboarding_status.trim();
+    if onboarding_status_is_set(raw) {
+        return raw.to_string();
+    }
+    if settings_has_usable_provider_config(settings) {
+        "completed".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+/**
+ * 持久化设置到存储文件
+ * 从 v2.4 起 API Key 直接保存在 settings.json 的 api_keys 数组中
+ *
+ * 降级兼容：写盘前把 api_keys[0] 镜像到 api_key_legacy（serde rename = "apiKey"）字段，
+ * 这样老版本（v2.3.x）反序列化时仍能从 apiKey 字段读到主 key 不丢。
+ * 新版加载时 sanitize_settings 会把 api_key_legacy.take() 合并回 api_keys 并去重，无副作用。
+ */
+pub fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let mut to_persist = settings.clone();
+    // Keep legacy top-level chat fields from turning Lens/Translator fallback into
+    // an explicit defaultModels.chat selection on the next load.
+    mirror_explicit_chat_default_for_persistence(&mut to_persist);
+
+    for provider in &mut to_persist.providers {
+        if let Some(primary) = provider.api_keys.first() {
+            if !primary.trim().is_empty() {
+                provider.api_key_legacy = Some(primary.clone());
+            }
+        }
+    }
+
+    // 降级镜像：把 ocr_mode 投影回 use_system_ocr，让降级到 v2.5.x 的版本仍能从 useSystemOcr 字段
+    // 读到对应行为。RapidOcr 模式镜像为 false（v2.5.x 没有 RapidOCR 概念，落回 CloudVision）。
+    let ocr_mode = to_persist
+        .screenshot_translation
+        .ocr_mode
+        .unwrap_or(OcrMode::CloudVision);
+    to_persist.screenshot_translation.use_system_ocr = matches!(ocr_mode, OcrMode::System);
+    to_persist.screenshot_translation.ocr_mode = Some(ocr_mode);
+
+    let store = StoreBuilder::new(app, SETTINGS_STORE)
+        .build()
+        .map_err(|e| e.to_string())?;
+    store.set(
+        "settings".to_string(),
+        serde_json::to_value(&to_persist).map_err(|e| e.to_string())?,
+    );
+    store.save().map_err(|e| e.to_string())
+}
+
+/**
+ * 从存储文件加载设置
+ * Beefex 使用全新的 com.beefapi.beefex 命名空间，不读取或迁移 Kivio/KeyLingo 数据。
+ */
+pub fn load_settings(app: &AppHandle) -> Settings {
+    let store = StoreBuilder::new(app, SETTINGS_STORE).build();
+    let settings = match store {
+        Ok(store) => store
+            .get("settings")
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default(),
+        Err(_) => Settings::default(),
+    };
+    sanitize_settings(settings)
+}
+
+// ========== 默认提示词生成 ==========
+
+/**
+ * 获取默认系统提示词
+ * has_image=true 时为视觉助手；为 false 时为通用对话助手（不假设有图片）
+ * 风格统一：简短直答、无小标题、思考过程尽量精简
+ */
+/// Local system date for Chat date questions. Models must not guess dates from training data.
+/// 只到日期级、不含时分：系统提示词是每轮请求的公共前缀，分钟级时钟会让同一对话每轮前缀
+/// 都变——打穿 provider 的 prompt cache（前缀匹配），也让会话亲和型代理无法续会话。
+/// 回答"今天/明天/星期几"日期粒度已足够。
+pub fn chat_current_datetime_context(language: &str) -> String {
+    let now = Local::now();
+    let weekday = weekday_label(language, now.weekday());
+    if language.starts_with("zh") {
+        format!(
+            "\n\n当前日期（系统时钟；回答今天/明天/星期几等日期问题必须以此为准，禁止凭记忆臆测）：{}年{}月{}日 {}。",
+            now.year(),
+            now.month(),
+            now.day(),
+            weekday
+        )
+    } else {
+        format!(
+            "\n\nToday's date (system clock; use for today/tomorrow/weekday questions—never guess from training data): {}-{:02}-{:02} {}.",
+            now.year(),
+            now.month(),
+            now.day(),
+            weekday
+        )
+    }
+}
+
+fn weekday_label(language: &str, weekday: chrono::Weekday) -> &'static str {
+    if language.starts_with("zh") {
+        match weekday {
+            chrono::Weekday::Mon => "星期一",
+            chrono::Weekday::Tue => "星期二",
+            chrono::Weekday::Wed => "星期三",
+            chrono::Weekday::Thu => "星期四",
+            chrono::Weekday::Fri => "星期五",
+            chrono::Weekday::Sat => "星期六",
+            chrono::Weekday::Sun => "星期日",
+        }
+    } else {
+        match weekday {
+            chrono::Weekday::Mon => "Monday",
+            chrono::Weekday::Tue => "Tuesday",
+            chrono::Weekday::Wed => "Wednesday",
+            chrono::Weekday::Thu => "Thursday",
+            chrono::Weekday::Fri => "Friday",
+            chrono::Weekday::Sat => "Saturday",
+            chrono::Weekday::Sun => "Sunday",
+        }
+    }
+}
+
+/// Lens 默认系统提示（含截图翻译后的视觉问答）：输出紧凑，尽量不输出空行。
+pub fn default_lens_system_prompt(language: &str, has_image: bool) -> String {
+    match (language.starts_with("zh"), has_image) {
+        (true, true) => "你是一位智能助手，能够看到用户分享的截图。请将其作为视觉上下文来理解和回答，可以涉及信息提取、概念解释、操作协助或任何相关话题。保持回答简洁直接，自然流畅，不用小标题和编号。输出必须紧凑：不要输出空行；只有在真正需要分隔段落、列表项、表格行、代码块或数学公式时才换行；列表项之间不要留空行。数学公式用 LaTeX（$...$ 或 $$...$$）。思考保持简洁，避免反复重述。".to_string(),
+        (true, false) => "你是一位智能助手。直接给出答案，回答简洁、自然流畅，不要小标题或编号。输出必须紧凑：不要输出空行；只有在真正需要分隔段落、列表项、表格行、代码块或数学公式时才换行；列表项之间不要留空行。数学公式用 LaTeX（$...$ 或 $$...$$）。思考保持简洁，避免反复重述。".to_string(),
+        (_, true) => "You are a helpful assistant that can see the user's screenshot. Use it as visual context to understand and answer, whether extracting information, explaining concepts, assisting with tasks, or any relevant topic. Keep responses short and natural, with no headings or bullet points unless a list is genuinely useful. Keep output compact: do not output blank lines; use a single newline only when needed for clear paragraph boundaries, list items, table rows, code blocks, or math; never put empty lines between list items. Use LaTeX ($...$ or $$...$$) for math. Think briefly; avoid repeating yourself.".to_string(),
+        (_, false) => "You are a helpful assistant. Answer directly. Keep responses short and natural, with no headings or bullet points unless a list is genuinely useful. Keep output compact: do not output blank lines; use a single newline only when needed for clear paragraph boundaries, list items, table rows, code blocks, or math; never put empty lines between list items. Use LaTeX ($...$ or $$...$$) for math. Think briefly; avoid repeating yourself.".to_string(),
+    }
+}
+
+/// Chat 客户端默认系统提示：允许正常 Markdown（含表格），不强制「不要空行」。
+pub fn default_chat_system_prompt(has_image: bool) -> String {
+    if has_image {
+        "You are the coding agent inside Beefex. You can help users inspect projects, write and edit files, run approved commands, search the web when available, analyze documents/data, and answer questions. You can use images the user provides. Answer clearly and concisely; Markdown is welcome (tables, lists, code blocks—each table row on its own line). Use LaTeX ($...$ or $$...$$) for math. Think briefly.".to_string()
+    } else {
+        "You are the coding agent inside Beefex. You can help users inspect projects, write and edit files, run approved commands, search the web when available, analyze documents/data, and answer questions. Answer clearly, directly, and concisely; Markdown is welcome (tables, lists, code blocks—each table row on its own line). Use LaTeX ($...$ or $$...$$) for math. Think briefly.".to_string()
+    }
+}
+
+/**
+ * Lens：关闭思考模式时附加到系统提示词末尾（含紧凑输出要求）。
+ */
+pub fn no_think_instruction(language: &str) -> &'static str {
+    if language.starts_with("zh") {
+        "\n\n严格要求：直接给出最终答案，不要输出任何思考过程、推理步骤或 <think> 内容。保持输出紧凑，不要输出空行。"
+    } else {
+        "\n\nStrict requirement: output only the final answer; do NOT include any thinking, reasoning steps, or <think> content. Keep output compact; do not output blank lines."
+    }
+}
+
+/// Chat：关闭思考模式时的附加指令（不要求紧凑、不禁止空行）。
+pub fn chat_no_think_instruction() -> &'static str {
+    "\n\nStrict requirement: output only the final answer; do NOT include any thinking, reasoning steps, or <think> content."
+}
+
+/**
+ * 获取默认问答提示词
+ * has_image=true 时让模型聚焦图片内容；has_image=false 时返回空串（不附加前缀，直接传用户原话）
+ */
+pub fn default_question_prompt(language: &str, has_image: bool) -> String {
+    if !has_image {
+        return String::new();
+    }
+    if language.starts_with("zh") {
+        "用户分享了这张截图，请结合其中的视觉信息来理解和回答：".to_string()
+    } else {
+        "The user shared this screenshot. Use the visual context to understand and answer:"
+            .to_string()
+    }
+}
+
+// ========== 默认值辅助函数 ==========
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
+}
+
+/// 冻结帧选区默认值：Windows 默认开启（规避透明置顶 WebView2 下浏览器视频变黑，
+/// 且配合优化后的依赖性能良好），其他平台保持关闭。该功能本身仅 Windows 生效。
+fn default_windows_freeze_frame_selection() -> bool {
+    cfg!(target_os = "windows")
+}
+
+fn default_api_format() -> String {
+    "openai_chat".to_string()
+}
+
+fn default_hotkey() -> String {
+    "CommandOrControl+Alt+T".to_string()
+}
+
+fn default_chat_hotkey() -> String {
+    "CommandOrControl+Shift+K".to_string()
+}
+
+fn default_screenshot_translation_hotkey() -> String {
+    "CommandOrControl+Shift+A".to_string()
+}
+
+fn default_screenshot_translation_text_hotkey() -> String {
+    "CommandOrControl+Shift+T".to_string()
+}
+
+fn default_screenshot_translation_replace_hotkey() -> String {
+    "CommandOrControl+Shift+R".to_string()
+}
+
+/// 快速翻译结果卡默认宽度（px）。介于旧截图卡(~514)与选中文本卡(420)之间。
+fn default_translate_card_width() -> u32 {
+    480
+}
+
+fn default_lens_hotkey() -> String {
+    "CommandOrControl+Shift+G".to_string()
+}
+
+fn default_theme() -> String {
+    "system".to_string()
+}
+
+fn default_theme_color() -> String {
+    "neutral".to_string()
+}
+
+fn default_target_lang() -> String {
+    "auto".to_string()
+}
+
+fn default_openai_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+
+fn default_openai_model() -> String {
+    "gpt-4o".to_string()
+}
+
+fn default_settings_language() -> Option<String> {
+    Some("zh".to_string())
+}
+
+fn default_retry_attempts() -> u8 {
+    5
+}
+
+fn default_retry_enabled() -> bool {
+    true
+}
+
+fn clamp_retry_attempts(value: u8) -> u8 {
+    value.clamp(1, 8)
+}
+
+/**
+ * 规范化可选提示词：去除空白，空字符串转为 None
+ */
+fn normalize_optional_prompt(value: Option<String>) -> Option<String> {
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+/**
+ * 规范化快捷键字符串：去除各部分首尾空白并过滤空部分
+ */
+fn normalize_hotkey(value: &str) -> String {
+    value
+        .split('+')
+        .map(|part| {
+            let trimmed = part.trim();
+            match trimmed.to_lowercase().as_str() {
+                "cmd" | "command" | "commandorcontrol" => "CommandOrControl".to_string(),
+                "ctrl" | "control" => "Control".to_string(),
+                "opt" | "option" | "alt" => "Alt".to_string(),
+                "shift" => "Shift".to_string(),
+                "super" | "meta" => "Super".to_string(),
+                "plus" => "Plus".to_string(),
+                _ => trimmed.to_string(),
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_model_info_without_temperature_deserializes_as_absent() {
+        let info: ModelInfo = serde_json::from_str(
+            r#"{"displayName":"Legacy","contextWindow":8192,"maxOutput":2048}"#,
+        )
+        .expect("legacy model info should deserialize");
+        assert_eq!(info.temperature, None);
+        assert_eq!(info.omit_temperature, None);
+    }
+
+    // ===== normalize_hotkey =====
+
+    #[test]
+    fn normalize_hotkey_canonicalizes_aliases() {
+        // 仅规范修饰键名（cmd/ctrl/opt/super/meta），按键名 case 透传
+        assert_eq!(normalize_hotkey("cmd+shift+a"), "CommandOrControl+Shift+a");
+        assert_eq!(normalize_hotkey("Command+Alt+T"), "CommandOrControl+Alt+T");
+        assert_eq!(normalize_hotkey("ctrl+shift+G"), "Control+Shift+G");
+        assert_eq!(normalize_hotkey("opt+space"), "Alt+space");
+        assert_eq!(normalize_hotkey("option+x"), "Alt+x");
+        assert_eq!(normalize_hotkey("super+L"), "Super+L");
+        assert_eq!(normalize_hotkey("meta+L"), "Super+L");
+    }
+
+    #[test]
+    fn normalize_hotkey_preserves_key_case() {
+        // 按键名大小写不被改动（Tauri 全局快捷键大小写敏感）
+        assert_eq!(normalize_hotkey("cmd+a"), "CommandOrControl+a");
+        assert_eq!(normalize_hotkey("cmd+A"), "CommandOrControl+A");
+    }
+
+    #[test]
+    fn normalize_hotkey_trims_whitespace() {
+        assert_eq!(
+            normalize_hotkey(" cmd + shift + a "),
+            "CommandOrControl+Shift+a"
+        );
+    }
+
+    #[test]
+    fn normalize_hotkey_filters_empty_parts() {
+        assert_eq!(normalize_hotkey("cmd++a"), "CommandOrControl+a");
+        assert_eq!(normalize_hotkey("+cmd+a+"), "CommandOrControl+a");
+    }
+
+    #[test]
+    fn normalize_hotkey_preserves_unknown_keys_verbatim() {
+        // F1, Backspace 等键名直接透传，不做 case 转换
+        assert_eq!(normalize_hotkey("cmd+F1"), "CommandOrControl+F1");
+        assert_eq!(normalize_hotkey("ctrl+Backspace"), "Control+Backspace");
+    }
+
+    // ===== sanitize_settings =====
+
+    #[test]
+    fn sanitize_settings_clamps_retry_attempts() {
+        let mut s = Settings::default();
+        s.retry_attempts = 0;
+        let s = sanitize_settings(s);
+        assert!((1..=8).contains(&s.retry_attempts));
+
+        let mut s = Settings::default();
+        s.retry_attempts = 99;
+        let s = sanitize_settings(s);
+        assert!((1..=8).contains(&s.retry_attempts));
+    }
+
+    #[test]
+    fn sanitize_settings_clamps_chat_max_output_tokens() {
+        let mut s = Settings::default();
+        s.chat.max_output_tokens = 0;
+        let s = sanitize_settings(s);
+        assert_eq!(s.chat.max_output_tokens, 512);
+
+        let mut s = Settings::default();
+        s.chat.max_output_tokens = 100_000;
+        let s = sanitize_settings(s);
+        assert_eq!(s.chat.max_output_tokens, 65_536);
+    }
+
+    #[test]
+    fn sanitize_settings_resets_unknown_theme_values() {
+        let mut s = Settings::default();
+        s.theme = "sepia".to_string();
+        s.theme_color = "mint".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.theme, "system");
+        assert_eq!(s.theme_color, "neutral");
+    }
+
+    #[test]
+    fn sanitize_settings_normalizes_hotkeys() {
+        let mut s = Settings::default();
+        s.hotkey = "cmd+alt+T".to_string();
+        s.chat_hotkey = "cmd+shift+K".to_string();
+        s.screenshot_translation.hotkey = "ctrl+shift+A".to_string();
+        s.screenshot_translation.text_hotkey = "cmd+shift+T".to_string();
+        s.lens.hotkey = "cmd+shift+G".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.hotkey, "CommandOrControl+Alt+T");
+        assert_eq!(s.chat_hotkey, "CommandOrControl+Shift+K");
+        assert_eq!(s.screenshot_translation.hotkey, "Control+Shift+A");
+        assert_eq!(
+            s.screenshot_translation.text_hotkey,
+            "CommandOrControl+Shift+T"
+        );
+        assert_eq!(s.lens.hotkey, "CommandOrControl+Shift+G");
+    }
+
+    #[test]
+    fn sanitize_settings_preserves_empty_hotkeys() {
+        let mut s = Settings::default();
+        s.hotkey = String::new();
+        s.screenshot_translation.hotkey = String::new();
+        s.screenshot_translation.text_hotkey = String::new();
+        s.lens.hotkey = String::new();
+        let s = sanitize_settings(s);
+        assert_eq!(s.hotkey, "");
+        assert_eq!(s.screenshot_translation.hotkey, "");
+        assert_eq!(s.screenshot_translation.text_hotkey, "");
+        assert_eq!(s.lens.hotkey, "");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn sanitize_settings_disables_system_ocr_on_unsupported_platforms() {
+        let mut s = Settings::default();
+        s.screenshot_translation.ocr_mode = Some(OcrMode::System);
+        let s = sanitize_settings(s);
+        assert_eq!(
+            s.screenshot_translation.ocr_mode,
+            Some(OcrMode::CloudVision)
+        );
+    }
+
+    #[test]
+    fn sanitize_settings_migrates_use_system_ocr_true_to_system_mode() {
+        // 老版本数据：useSystemOcr=true 但没有 ocr_mode 字段
+        let mut s = Settings::default();
+        s.screenshot_translation.use_system_ocr = true;
+        s.screenshot_translation.ocr_mode = None;
+        let s = sanitize_settings(s);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(s.screenshot_translation.ocr_mode, Some(OcrMode::System));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(
+            s.screenshot_translation.ocr_mode,
+            Some(OcrMode::CloudVision)
+        );
+    }
+
+    #[test]
+    fn sanitize_settings_migrates_use_system_ocr_false_to_cloud_vision_mode() {
+        let mut s = Settings::default();
+        s.screenshot_translation.use_system_ocr = false;
+        s.screenshot_translation.ocr_mode = None;
+        let s = sanitize_settings(s);
+        assert_eq!(
+            s.screenshot_translation.ocr_mode,
+            Some(OcrMode::CloudVision)
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn sanitize_settings_preserves_rapidocr_mode() {
+        let mut s = Settings::default();
+        s.screenshot_translation.ocr_mode = Some(OcrMode::RapidOcr);
+        let s = sanitize_settings(s);
+        assert_eq!(s.screenshot_translation.ocr_mode, Some(OcrMode::RapidOcr));
+    }
+
+    #[test]
+    fn rapid_ocr_tier_defaults_for_legacy_configs() {
+        // 旧版 settings.json 没有 rapid_ocr_tier 字段:截图翻译默认 "standard"(现有 v5
+        // mobile 用户零感知),知识库文档处理默认 "high"(入库要识别质量)。
+        let screenshot: ScreenshotTranslationConfig =
+            serde_json::from_str("{}").expect("empty screenshot config should load");
+        assert_eq!(screenshot.rapid_ocr_tier, "standard");
+
+        let doc_processing: DocumentProcessingConfig =
+            serde_json::from_str("{}").expect("empty document processing config should load");
+        assert_eq!(doc_processing.rapid_ocr_tier, "high");
+    }
+
+    #[test]
+    fn sanitize_settings_normalizes_invalid_rapid_ocr_tier() {
+        let mut s = Settings::default();
+        s.screenshot_translation.rapid_ocr_tier = "garbage".to_string();
+        s.document_processing.rapid_ocr_tier = "garbage".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.screenshot_translation.rapid_ocr_tier, "standard");
+        assert_eq!(s.document_processing.rapid_ocr_tier, "high");
+    }
+
+    #[test]
+    fn sanitize_settings_migrates_legacy_tesseract_to_rapidocr() {
+        // 旧版本 settings.json 含 "ocrMode": "tesseract"——序列化后落到 OcrMode::Legacy
+        // 兜底变体,sanitize_settings 把它迁移到 RapidOcr,避免从本地 OCR 静默变成云端视觉。
+        let json = r#"{"ocrMode":"tesseract"}"#;
+        let cfg: ScreenshotTranslationConfig =
+            serde_json::from_str(json).expect("legacy variant should deserialize");
+        assert_eq!(cfg.ocr_mode, Some(OcrMode::Legacy));
+
+        let mut s = Settings::default();
+        s.screenshot_translation.ocr_mode = Some(OcrMode::Legacy);
+        let s = sanitize_settings(s);
+        assert_eq!(s.screenshot_translation.ocr_mode, Some(OcrMode::RapidOcr));
+    }
+
+    #[test]
+    fn ocr_mode_serializes_with_snake_case() {
+        // ocrMode 在 settings.json 里是 snake_case 字符串(cloud_vision / system / rapid_ocr)。
+        // 前端 union type 'cloud_vision' | 'system' | 'rapid_ocr' 直接对齐。
+        let modes = [
+            (OcrMode::CloudVision, "\"cloud_vision\""),
+            (OcrMode::System, "\"system\""),
+            (OcrMode::RapidOcr, "\"rapid_ocr\""),
+        ];
+        for (mode, expected) in modes {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn sanitize_settings_removes_legacy_apple_local_provider() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "apple".to_string(),
+            name: "Legacy Apple Local".to_string(),
+            api_keys: vec!["__on_device__".to_string()],
+            api_key_legacy: None,
+            base_url: LEGACY_APPLE_INTELLIGENCE_BASE_URL.to_string(),
+            available_models: vec![],
+            enabled_models: vec!["apple-foundation".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "cloud".to_string(),
+            name: "Cloud".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["gpt-4o".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "apple".to_string();
+        s.translator_model = "apple-foundation".to_string();
+        s.screenshot_translation.provider_id = "apple".to_string();
+        s.screenshot_translation.model = "apple-foundation".to_string();
+        s.lens.provider_id = "apple".to_string();
+        s.lens.model = "apple-foundation".to_string();
+        s.chat_provider_id = "apple".to_string();
+        s.chat_model = "apple-foundation".to_string();
+        s.default_models.chat.provider_id = "apple".to_string();
+        s.default_models.chat.model = "apple-foundation".to_string();
+        s.default_models.vision.provider_id = "apple".to_string();
+        s.default_models.vision.model = "apple-foundation".to_string();
+        s.default_models.title_summary.provider_id = "apple".to_string();
+        s.default_models.title_summary.model = "apple-foundation".to_string();
+        s.default_models.compression.provider_id = "apple".to_string();
+        s.default_models.compression.model = "apple-foundation".to_string();
+        s.default_models.image_generation.provider_id = "apple".to_string();
+        s.default_models.image_generation.model = "apple-foundation".to_string();
+
+        let s = sanitize_settings(s);
+        assert!(s.providers.iter().all(|provider| provider.id != "apple"));
+        assert_eq!(s.translator_provider_id, "cloud");
+        assert_eq!(s.translator_model, "gpt-4o");
+        assert_eq!(s.screenshot_translation.provider_id, "cloud");
+        assert_eq!(s.screenshot_translation.model, "gpt-4o");
+        assert_eq!(s.lens.provider_id, "");
+        assert_eq!(s.lens.model, "");
+        assert_eq!(s.default_models.chat.provider_id, "cloud");
+        assert_eq!(s.default_models.chat.model, "gpt-4o");
+        assert_eq!(s.default_models.vision.provider_id, "cloud");
+        assert_eq!(s.default_models.title_summary.provider_id, "cloud");
+        assert_eq!(s.default_models.compression.provider_id, "cloud");
+        assert_eq!(s.default_models.image_generation.provider_id, "cloud");
+    }
+
+    #[test]
+    fn sanitize_settings_migrates_legacy_apikey_to_apikeys() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec![],
+            api_key_legacy: Some("sk-legacy".to_string()),
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(p.api_keys, vec!["sk-legacy".to_string()]);
+        assert!(p.api_key_legacy.is_none(), "legacy field should be drained");
+    }
+
+    #[test]
+    fn sanitize_settings_routes_beefapi_through_responses() {
+        let mut settings = Settings::default();
+        settings.providers.push(ModelProvider {
+            id: "beefapi".to_string(),
+            name: "BeefAPI".to_string(),
+            api_keys: vec!["sk-test".to_string()],
+            api_key_legacy: None,
+            base_url: "https://beefapi.com".to_string(),
+            available_models: vec![],
+            enabled_models: vec![],
+            api_format: "openai_chat".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+
+        let provider = sanitize_settings(settings).providers.remove(0);
+
+        assert_eq!(provider.base_url, "https://beefapi.com/v1");
+        assert_eq!(provider.api_format, "openai_responses");
+    }
+
+    #[test]
+    fn sanitize_settings_does_not_rewrite_beefapi_lookalike_hosts() {
+        for base_url in [
+            "https://beefapi.com.example.com",
+            "https://user@beefapi.com",
+            "https://beefapi.com:8443",
+            "http://beefapi.com",
+        ] {
+            let mut settings = Settings::default();
+            settings.providers.push(ModelProvider {
+                id: "lookalike".to_string(),
+                name: "Lookalike".to_string(),
+                api_keys: vec!["sk-test".to_string()],
+                api_key_legacy: None,
+                base_url: base_url.to_string(),
+                available_models: vec![],
+                enabled_models: vec![],
+                api_format: "openai_chat".to_string(),
+                enabled: true,
+                model_overrides: std::collections::HashMap::new(),
+                compress_request_body: false,
+            });
+
+            let provider = sanitize_settings(settings).providers.remove(0);
+
+            assert_eq!(provider.base_url, base_url);
+            assert_eq!(provider.api_format, "openai_chat");
+        }
+    }
+
+    #[test]
+    fn sanitize_settings_keeps_canonical_beefapi_responses_idempotent() {
+        let mut settings = Settings::default();
+        settings.providers.push(ModelProvider {
+            id: "beefapi".to_string(),
+            name: "BeefAPI".to_string(),
+            api_keys: vec!["sk-test".to_string()],
+            api_key_legacy: None,
+            base_url: BEEFAPI_RESPONSES_BASE_URL.to_string(),
+            available_models: vec![],
+            enabled_models: vec![],
+            api_format: "openai_responses".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+
+        let provider = sanitize_settings(settings).providers.remove(0);
+
+        assert_eq!(provider.base_url, BEEFAPI_RESPONSES_BASE_URL);
+        assert_eq!(provider.api_format, "openai_responses");
+    }
+
+    #[test]
+    fn sanitize_settings_dedupes_apikey_legacy_against_apikeys() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec!["sk-1".to_string(), "sk-2".to_string()],
+            api_key_legacy: Some("sk-1".to_string()), // 已在 api_keys 中
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(
+            p.api_keys.len(),
+            2,
+            "duplicate legacy key should not be inserted"
+        );
+    }
+
+    #[test]
+    fn sanitize_settings_filters_empty_apikeys() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec!["sk-1".to_string(), "  ".to_string(), String::new()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(p.api_keys, vec!["sk-1".to_string()]);
+    }
+
+    #[test]
+    fn chat_tools_default_limits_keep_tool_round_cap() {
+        assert_eq!(
+            ChatToolsConfig::default().max_tool_rounds,
+            Some(CHAT_TOOL_DEFAULT_ROUNDS)
+        );
+        assert_eq!(
+            ChatToolsConfig::default().max_tool_output_chars,
+            Some(DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+        );
+
+        let cfg: ChatToolsConfig =
+            serde_json::from_str("{}").expect("empty chat tools config should load");
+        assert_eq!(cfg.max_tool_rounds, Some(CHAT_TOOL_DEFAULT_ROUNDS));
+        // 缺省字段经 serde default 补成默认截断值（而非 None/不截断）。
+        assert_eq!(
+            cfg.max_tool_output_chars,
+            Some(DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+        );
+    }
+
+    #[test]
+    fn sanitize_settings_clamps_chat_tool_round_limit_and_keeps_unlimited() {
+        let mut settings = Settings::default();
+        settings.chat_tools.max_tool_rounds = Some(CHAT_TOOL_MAX_ROUNDS + 30);
+        settings.chat_tools.max_tool_output_chars = Some(12_000);
+
+        let settings = sanitize_settings(settings);
+
+        assert_eq!(
+            settings.chat_tools.max_tool_rounds,
+            Some(CHAT_TOOL_MAX_ROUNDS)
+        );
+        // 合法区间内的值原样保留（不再被无条件清成 None）。
+        assert_eq!(settings.chat_tools.max_tool_output_chars, Some(12_000));
+
+        let mut settings = Settings::default();
+        settings.chat_tools.max_tool_rounds = None;
+
+        let settings = sanitize_settings(settings);
+
+        assert_eq!(settings.chat_tools.max_tool_rounds, None);
+    }
+
+    #[test]
+    fn greenlight_migration_enables_tools_and_flips_legacy_policy() {
+        // Simulate a pre-green-light install: flag unset, native tools off, old policy.
+        let mut settings = Settings::default();
+        settings.chat_tools_greenlit_v1 = false;
+        settings.chat_tools.native_tools = ChatNativeToolsConfig {
+            skill_runtime: true,
+            ..Default::default()
+        };
+        settings.chat_tools.native_tools.read_file = false;
+        settings.chat_tools.native_tools.write_file = false;
+        settings.chat_tools.native_tools.run_command = false;
+        settings.chat_tools.approval_policy = LEGACY_DEFAULT_APPROVAL_POLICY.to_string();
+
+        let settings = sanitize_settings(settings);
+
+        assert!(settings.chat_tools_greenlit_v1);
+        assert!(settings.chat_tools.native_tools.read_file);
+        assert!(settings.chat_tools.native_tools.write_file);
+        assert!(settings.chat_tools.native_tools.run_command);
+        assert_eq!(settings.chat_tools.approval_policy, "auto");
+    }
+
+    #[test]
+    fn greenlight_migration_is_idempotent_and_keeps_explicit_choices() {
+        // Already migrated: a user-disabled tool and an explicit policy must survive.
+        let mut settings = Settings::default();
+        settings.chat_tools_greenlit_v1 = true;
+        settings.chat_tools.native_tools.run_command = false;
+        settings.chat_tools.approval_policy = "always_confirm".to_string();
+
+        let settings = sanitize_settings(settings);
+
+        assert!(!settings.chat_tools.native_tools.run_command);
+        assert_eq!(settings.chat_tools.approval_policy, "always_confirm");
+    }
+
+    #[test]
+    fn greenlight_migration_does_not_stomp_explicit_policy_on_first_run() {
+        // Pre-green-light flag, but the user had explicitly chosen always_confirm.
+        let mut settings = Settings::default();
+        settings.chat_tools_greenlit_v1 = false;
+        settings.chat_tools.approval_policy = "always_confirm".to_string();
+
+        let settings = sanitize_settings(settings);
+
+        // Tools still get enabled, but the explicit policy is preserved.
+        assert!(settings.chat_tools_greenlit_v1);
+        assert!(settings.chat_tools.native_tools.read_file);
+        assert_eq!(settings.chat_tools.approval_policy, "always_confirm");
+    }
+
+    #[test]
+    fn sanitize_settings_normalizes_and_clamps_tool_output_chars() {
+        // None（旧的"不截断"）→ 归一到默认截断值，绝不再保留 None（上下文撑爆根因）。
+        let mut settings = Settings::default();
+        settings.chat_tools.max_tool_output_chars = None;
+        let settings = sanitize_settings(settings);
+        assert_eq!(
+            settings.chat_tools.max_tool_output_chars,
+            Some(DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+        );
+
+        // 过小钳到下限。
+        let mut settings = Settings::default();
+        settings.chat_tools.max_tool_output_chars = Some(1);
+        let settings = sanitize_settings(settings);
+        assert_eq!(
+            settings.chat_tools.max_tool_output_chars,
+            Some(CHAT_TOOL_MIN_OUTPUT_CHARS)
+        );
+
+        // 过大钳到上限。
+        let mut settings = Settings::default();
+        settings.chat_tools.max_tool_output_chars = Some(usize::MAX);
+        let settings = sanitize_settings(settings);
+        assert_eq!(
+            settings.chat_tools.max_tool_output_chars,
+            Some(CHAT_TOOL_MAX_OUTPUT_CHARS)
+        );
+    }
+
+    #[test]
+    fn sanitize_settings_clamps_mcp_idle_timeout_and_keeps_default() {
+        // 默认值保持不变（在范围内）。
+        assert_eq!(ChatToolsConfig::default().mcp_idle_timeout_ms, 600_000);
+
+        // 太小钳到下限 60s。
+        let mut settings = Settings::default();
+        settings.chat_tools.mcp_idle_timeout_ms = 1_000;
+        let settings = sanitize_settings(settings);
+        assert_eq!(
+            settings.chat_tools.mcp_idle_timeout_ms,
+            MCP_IDLE_TIMEOUT_MIN_MS
+        );
+
+        // 太大钳到上限 24h。
+        let mut settings = Settings::default();
+        settings.chat_tools.mcp_idle_timeout_ms = u64::MAX;
+        let settings = sanitize_settings(settings);
+        assert_eq!(
+            settings.chat_tools.mcp_idle_timeout_ms,
+            MCP_IDLE_TIMEOUT_MAX_MS
+        );
+
+        // 缺省（旧 settings.json 无此字段）走 serde default 600000。
+        let cfg: ChatToolsConfig =
+            serde_json::from_str("{}").expect("ChatToolsConfig defaults from empty object");
+        assert_eq!(cfg.mcp_idle_timeout_ms, 600_000);
+    }
+
+    #[test]
+    fn sanitize_settings_keeps_empty_models_for_unfetched_provider() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec![],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "p".to_string();
+        s.screenshot_translation.provider_id = "p".to_string();
+
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert!(p.available_models.is_empty());
+        assert!(p.enabled_models.is_empty());
+        assert!(s.translator_model.is_empty());
+        assert!(s.screenshot_translation.model.is_empty());
+    }
+
+    #[test]
+    fn sanitize_settings_defaults_chat_to_lens_then_translator() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "translator".to_string(),
+            name: "Translator".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["gpt-4o".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "lens".to_string(),
+            name: "Lens".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["vision-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "translator".to_string();
+        s.translator_model = "gpt-4o".to_string();
+        s.lens.provider_id = "lens".to_string();
+        s.lens.model = "vision-model".to_string();
+
+        let s = sanitize_settings(s);
+        assert_eq!(s.chat_provider_id, "lens");
+        assert_eq!(s.chat_model, "vision-model");
+        assert!(
+            s.default_models.chat.provider_id.is_empty(),
+            "Lens fallback should not become an explicit Chat default slot"
+        );
+    }
+
+    #[test]
+    fn unset_auxiliary_models_inherit_effective_chat_model() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "translator".to_string(),
+            name: "Translator".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["gpt-4o".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "lens".to_string(),
+            name: "Lens".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["vision-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "translator".to_string();
+        s.translator_model = "gpt-4o".to_string();
+        s.lens.provider_id = "lens".to_string();
+        s.lens.model = "vision-model".to_string();
+
+        let s = sanitize_settings(s);
+
+        assert_eq!(
+            s.effective_chat_model(),
+            ("lens".to_string(), "vision-model".to_string())
+        );
+        assert!(!s.has_explicit_vision_model());
+        assert_eq!(s.effective_vision_model(), s.effective_chat_model());
+        assert_eq!(
+            s.effective_title_summary_model_for_session(None),
+            s.effective_chat_model()
+        );
+        assert_eq!(
+            s.effective_compression_model_for_session(None),
+            s.effective_chat_model()
+        );
+        assert!(s.image_generation_model().is_none());
+        assert!(s.default_models.vision.provider_id.is_empty());
+        assert!(s.default_models.title_summary.provider_id.is_empty());
+        assert!(s.default_models.compression.provider_id.is_empty());
+        assert!(s.default_models.image_generation.provider_id.is_empty());
+    }
+
+    #[test]
+    fn effective_side_models_auto_prefer_session_over_global_chat_default() {
+        let mut settings = Settings::default();
+        settings.providers.push(ModelProvider {
+            id: "global".to_string(),
+            name: "Global".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["gemini-3.1-flash-lite".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        settings.providers.push(ModelProvider {
+            id: "session".to_string(),
+            name: "Session".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["gpt-4.1".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        settings.default_models.chat.provider_id = "global".to_string();
+        settings.default_models.chat.model = "gemini-3.1-flash-lite".to_string();
+
+        let session = SessionModel {
+            provider_id: "session",
+            model: "gpt-4.1",
+        };
+
+        assert_eq!(
+            settings.effective_title_summary_model_for_session(Some(session)),
+            ("session".to_string(), "gpt-4.1".to_string())
+        );
+        assert_eq!(
+            settings.effective_compression_model_for_session(Some(session)),
+            ("session".to_string(), "gpt-4.1".to_string())
+        );
+        assert_eq!(
+            settings.effective_vision_model_for_session(Some(session)),
+            ("session".to_string(), "gpt-4.1".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_settings_keeps_valid_chat_model() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "chat".to_string(),
+            name: "Chat".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m1".to_string(), "m2".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.chat_provider_id = "chat".to_string();
+        s.chat_model = "m2".to_string();
+
+        let s = sanitize_settings(s);
+        assert_eq!(s.chat_provider_id, "chat");
+        assert_eq!(s.chat_model, "m2");
+        assert_eq!(s.default_models.chat.provider_id, "chat");
+        assert_eq!(s.default_models.chat.model, "m2");
+    }
+
+    #[test]
+    fn explicit_default_model_slots_are_independent() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "chat".to_string(),
+            name: "Chat".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["chat-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "vision".to_string(),
+            name: "Vision".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["vision-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "title".to_string(),
+            name: "Title".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["title-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "compression".to_string(),
+            name: "Compression".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["compression-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "image".to_string(),
+            name: "Image".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["image-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "chat".to_string();
+        s.translator_model = "chat-model".to_string();
+        s.default_models.chat.provider_id = "chat".to_string();
+        s.default_models.chat.model = "chat-model".to_string();
+        s.default_models.vision.provider_id = "vision".to_string();
+        s.default_models.vision.model = "vision-model".to_string();
+        s.default_models.title_summary.provider_id = "title".to_string();
+        s.default_models.title_summary.model = "title-model".to_string();
+        s.default_models.compression.provider_id = "compression".to_string();
+        s.default_models.compression.model = "compression-model".to_string();
+        s.default_models.image_generation.provider_id = "image".to_string();
+        s.default_models.image_generation.model = "image-model".to_string();
+
+        let s = sanitize_settings(s);
+
+        assert_eq!(
+            s.effective_chat_model(),
+            ("chat".to_string(), "chat-model".to_string())
+        );
+        assert_eq!(
+            s.effective_title_summary_model_for_session(None),
+            ("title".to_string(), "title-model".to_string())
+        );
+        assert!(s.has_explicit_vision_model());
+        assert_eq!(
+            s.effective_vision_model(),
+            ("vision".to_string(), "vision-model".to_string())
+        );
+        assert_eq!(
+            s.effective_compression_model_for_session(None),
+            ("compression".to_string(), "compression-model".to_string())
+        );
+        assert_eq!(
+            s.image_generation_model(),
+            Some(("image".to_string(), "image-model".to_string()))
+        );
+    }
+
+    #[test]
+    fn sanitize_settings_repairs_invalid_default_model_slots() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "chat".to_string(),
+            name: "Chat".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m1".to_string(), "m2".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "chat".to_string();
+        s.translator_model = "m1".to_string();
+        s.default_models.chat.provider_id = "chat".to_string();
+        s.default_models.chat.model = "removed".to_string();
+        s.default_models.vision.provider_id = "chat".to_string();
+        s.default_models.vision.model = String::new();
+        s.default_models.title_summary.provider_id = "deleted-provider".to_string();
+        s.default_models.title_summary.model = "ghost".to_string();
+        s.default_models.compression.provider_id = "chat".to_string();
+        s.default_models.compression.model = String::new();
+        s.default_models.image_generation.provider_id = "chat".to_string();
+        s.default_models.image_generation.model = String::new();
+
+        let s = sanitize_settings(s);
+
+        assert_eq!(s.default_models.chat.provider_id, "chat");
+        assert_eq!(s.default_models.chat.model, "m1");
+        assert_eq!(s.default_models.vision.provider_id, "chat");
+        assert_eq!(s.default_models.vision.model, "m1");
+        assert!(s.default_models.title_summary.provider_id.is_empty());
+        assert!(s.default_models.title_summary.model.is_empty());
+        assert_eq!(s.default_models.compression.provider_id, "chat");
+        assert_eq!(s.default_models.compression.model, "m1");
+        assert_eq!(s.default_models.image_generation.provider_id, "chat");
+        assert_eq!(s.default_models.image_generation.model, "m1");
+        assert_eq!(s.chat_provider_id, "chat");
+        assert_eq!(s.chat_model, "m1");
+    }
+
+    #[test]
+    fn persistence_mirror_keeps_unset_chat_default_unset() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "translator".to_string(),
+            name: "Translator".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["gpt-4o".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "lens".to_string(),
+            name: "Lens".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["vision-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "translator".to_string();
+        s.translator_model = "gpt-4o".to_string();
+        s.lens.provider_id = "lens".to_string();
+        s.lens.model = "vision-model".to_string();
+
+        let mut s = sanitize_settings(s);
+        assert_eq!(s.chat_provider_id, "lens");
+        assert_eq!(s.chat_model, "vision-model");
+        assert!(s.default_models.chat.provider_id.is_empty());
+
+        mirror_explicit_chat_default_for_persistence(&mut s);
+
+        assert!(s.chat_provider_id.is_empty());
+        assert!(s.chat_model.is_empty());
+        assert!(s.default_models.chat.provider_id.is_empty());
+    }
+
+    #[test]
+    fn default_models_serialize_as_structured_camel_case_settings() {
+        let mut s = Settings::default();
+        s.default_models.vision.provider_id = "vision-provider".to_string();
+        s.default_models.vision.model = "vision-model".to_string();
+        s.default_models.title_summary.provider_id = "title-provider".to_string();
+        s.default_models.title_summary.model = "title-model".to_string();
+        s.default_models.image_generation.provider_id = "image-provider".to_string();
+        s.default_models.image_generation.model = "image-model".to_string();
+        let value = serde_json::to_value(&s).expect("settings should serialize");
+
+        assert_eq!(
+            value["defaultModels"]["vision"]["providerId"],
+            "vision-provider"
+        );
+        assert_eq!(value["defaultModels"]["vision"]["model"], "vision-model");
+        assert_eq!(
+            value["defaultModels"]["titleSummary"]["providerId"],
+            "title-provider"
+        );
+        assert_eq!(
+            value["defaultModels"]["titleSummary"]["model"],
+            "title-model"
+        );
+        assert_eq!(
+            value["defaultModels"]["imageGeneration"]["providerId"],
+            "image-provider"
+        );
+        assert_eq!(
+            value["defaultModels"]["imageGeneration"]["model"],
+            "image-model"
+        );
+        assert!(value["defaultModels"]["chat"]["providerId"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn sanitize_settings_preserves_streamable_http_mcp_server() {
+        let mut s = Settings::default();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(" Authorization ".to_string(), " Bearer token ".to_string());
+        s.chat_tools.servers.push(ChatMcpServer {
+            id: " http-server ".to_string(),
+            name: " Remote ".to_string(),
+            enabled: true,
+            transport: "sse".to_string(),
+            url: " https://example.com/mcp ".to_string(),
+            command: " ignored ".to_string(),
+            args: vec![" ".to_string(), "--unused".to_string()],
+            env: std::collections::HashMap::new(),
+            headers,
+            cwd: None,
+            enabled_tools: vec![" fetch ".to_string(), "".to_string()],
+            connector_id: None,
+            auth: None,
+        });
+
+        let s = sanitize_settings(s);
+        let server = &s.chat_tools.servers[0];
+        assert_eq!(server.id, "http-server");
+        assert_eq!(server.name, "Remote");
+        assert_eq!(server.transport, "streamable_http");
+        assert_eq!(server.url, "https://example.com/mcp");
+        assert_eq!(
+            server.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token"),
+        );
+        assert_eq!(server.enabled_tools, vec!["fetch".to_string()]);
+    }
+
+    #[test]
+    fn sanitize_settings_resets_unknown_mcp_transport_to_stdio() {
+        let mut s = Settings::default();
+        s.chat_tools.servers.push(ChatMcpServer {
+            id: "mcp-1".to_string(),
+            name: "Local".to_string(),
+            enabled: false,
+            transport: "websocket".to_string(),
+            url: String::new(),
+            command: " npx ".to_string(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            connector_id: None,
+            auth: None,
+        });
+
+        let s = sanitize_settings(s);
+        let server = &s.chat_tools.servers[0];
+        assert_eq!(server.transport, "stdio");
+        assert_eq!(server.command, "npx");
+    }
+
+    #[test]
+    fn sanitize_settings_clamps_unknown_message_order() {
+        let mut s = Settings::default();
+        s.lens.message_order = "garbage".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.lens.message_order, "asc");
+    }
+
+    #[test]
+    fn lens_capture_hint_defaults_to_enabled() {
+        let s = Settings::default();
+        assert!(s.lens.show_capture_hint);
+
+        let cfg: LensConfig = serde_json::from_str("{}").expect("empty lens config should load");
+        assert!(cfg.show_capture_hint);
+    }
+
+    #[test]
+    fn lens_send_to_chat_defaults_to_enabled() {
+        let s = Settings::default();
+        assert!(s.lens.send_to_chat);
+
+        let cfg: LensConfig = serde_json::from_str("{}").expect("empty lens config should load");
+        assert!(cfg.send_to_chat);
+    }
+
+    #[test]
+    fn lens_windows_freeze_frame_selection_defaults_per_platform() {
+        // Windows 默认开启，其他平台默认关闭。
+        let expected = cfg!(target_os = "windows");
+
+        let s = Settings::default();
+        assert_eq!(s.lens.windows_freeze_frame_selection, expected);
+
+        let cfg: LensConfig = serde_json::from_str("{}").expect("empty lens config should load");
+        assert_eq!(cfg.windows_freeze_frame_selection, expected);
+    }
+
+    #[test]
+    fn sanitize_settings_resets_lens_provider_when_pointing_to_nonexistent() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "real".to_string(),
+            name: "Real".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.lens.provider_id = "nonexistent".to_string();
+        s.lens.model = "ghost-model".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.lens.provider_id, "");
+        assert_eq!(s.lens.model, "");
+    }
+
+    #[test]
+    fn sanitize_settings_marks_onboarding_completed_for_existing_provider_config() {
+        let mut s = Settings::default();
+        s.onboarding_status.clear();
+        s.providers.push(ModelProvider {
+            id: "active".to_string(),
+            name: "Active".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://active.example/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["live-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        let s = sanitize_settings(s);
+        assert_eq!(s.onboarding_status, "completed");
+    }
+
+    #[test]
+    fn sanitize_settings_keeps_pending_onboarding_for_fresh_install() {
+        let s = sanitize_settings(Settings::default());
+        assert_eq!(s.onboarding_status, "pending");
+    }
+
+    #[test]
+    fn sanitize_settings_keeps_explicit_pending_for_restart_onboarding() {
+        let mut s = Settings::default();
+        s.onboarding_status = "pending".to_string();
+        s.providers.push(ModelProvider {
+            id: "active".to_string(),
+            name: "Active".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://active.example/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["live-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        let s = sanitize_settings(s);
+        assert_eq!(s.onboarding_status, "pending");
+    }
+
+    #[test]
+    fn sanitize_settings_reassigns_disabled_provider_selections() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "disabled".to_string(),
+            name: "Disabled".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://disabled.example/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["off-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: false,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.providers.push(ModelProvider {
+            id: "active".to_string(),
+            name: "Active".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://active.example/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["live-model".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        });
+        s.translator_provider_id = "disabled".to_string();
+        s.translator_model = "off-model".to_string();
+        s.screenshot_translation.provider_id = "disabled".to_string();
+        s.screenshot_translation.model = "off-model".to_string();
+        s.lens.provider_id = "disabled".to_string();
+        s.lens.model = "off-model".to_string();
+        s.default_models.chat.provider_id = "disabled".to_string();
+        s.default_models.chat.model = "off-model".to_string();
+
+        let s = sanitize_settings(s);
+
+        assert_eq!(s.translator_provider_id, "active");
+        assert_eq!(s.translator_model, "live-model");
+        assert_eq!(s.screenshot_translation.provider_id, "active");
+        assert_eq!(s.screenshot_translation.model, "live-model");
+        assert_eq!(s.lens.provider_id, "");
+        assert_eq!(s.lens.model, "");
+        assert_eq!(s.default_models.chat.provider_id, "");
+        assert_eq!(s.default_models.chat.model, "");
+    }
+
+    #[test]
+    fn chat_current_datetime_context_uses_local_clock() {
+        let now = Local::now();
+        let zh = chat_current_datetime_context("zh");
+        assert!(zh.contains("系统时钟"));
+        assert!(zh.contains(&format!("{}年", now.year())));
+        let en = chat_current_datetime_context("en");
+        assert!(en.contains("system clock"));
+        assert!(en.contains(&format!("{}-", now.year())));
+    }
+
+    #[test]
+    fn chat_current_datetime_context_is_date_only_prefix_stable() {
+        // 前缀稳定性：不含时分（HH:MM 会让同一对话每轮系统提示词都变，打穿 prompt cache）。
+        // 同一天内多次调用必须逐字节一致。
+        let has_hh_mm = |s: &str| {
+            s.as_bytes().windows(5).any(|w| {
+                w[0].is_ascii_digit()
+                    && w[1].is_ascii_digit()
+                    && w[2] == b':'
+                    && w[3].is_ascii_digit()
+                    && w[4].is_ascii_digit()
+            })
+        };
+        for lang in ["zh", "en"] {
+            let a = chat_current_datetime_context(lang);
+            let b = chat_current_datetime_context(lang);
+            assert_eq!(a, b, "same-day calls must be byte-identical ({lang})");
+            assert!(
+                !has_hh_mm(&a),
+                "no HH:MM clock in the prompt prefix ({lang}): {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn email_accounts_system_prompt_mentions_manual_install_and_binary() {
+        let account = EmailAccountConfig {
+            id: "work".into(),
+            email: "user@example.com".into(),
+            ..Default::default()
+        };
+        let prompt =
+            email_accounts_system_prompt(&[account], Some("/opt/kivio/himalaya")).expect("prompt");
+        assert!(prompt.contains("user@example.com"));
+        assert!(prompt.contains("Kivio Email connector"));
+        assert!(prompt.contains("Himalaya binary: /opt/kivio/himalaya"));
+        assert!(!prompt.contains("brew install"));
+
+        let en = email_accounts_system_prompt(
+            &[EmailAccountConfig {
+                email: "user@example.com".into(),
+                ..Default::default()
+            }],
+            None,
+        )
+        .expect("prompt");
+        assert!(en.contains("Kivio Email connector"));
+        assert!(!en.contains("automatically"));
+    }
+
+    #[test]
+    fn skill_globally_available_hides_himalaya_without_email() {
+        let chat_tools = ChatToolsConfig::default();
+        assert!(!skill_globally_available(
+            &chat_tools,
+            EMAIL_CONNECTOR_SKILL_ID,
+            &[],
+            false,
+        ));
+        assert!(!skill_connector_satisfied(
+            EMAIL_CONNECTOR_SKILL_ID,
+            &[],
+            false
+        ));
+        // pdf is not connector-gated
+        assert!(skill_globally_available(&chat_tools, "pdf", &[], false));
+    }
+
+    #[test]
+    fn skill_globally_available_hides_obsidian_without_vault() {
+        let chat_tools = ChatToolsConfig::default();
+        for id in OBSIDIAN_CONNECTOR_SKILL_IDS {
+            // No vault configured → each Obsidian skill is unavailable.
+            assert!(
+                !skill_globally_available(&chat_tools, id, &[], false),
+                "{id} should be hidden without a vault"
+            );
+            assert!(!skill_connector_satisfied(id, &[], false));
+            // Vault configured → available (email state is irrelevant here).
+            assert!(
+                skill_globally_available(&chat_tools, id, &[], true),
+                "{id} should be available with a vault"
+            );
+            assert!(skill_connector_satisfied(id, &[], true));
+        }
+        // Non-connector skills are unaffected by vault state.
+        assert!(skill_globally_available(&chat_tools, "pdf", &[], false));
+    }
+
+    #[test]
+    fn skill_global_unavailable_error_distinguishes_disabled_and_connector() {
+        let mut chat_tools = ChatToolsConfig::default();
+        chat_tools.disabled_skill_ids = vec![EMAIL_CONNECTOR_SKILL_ID.to_string()];
+        assert_eq!(
+            skill_global_unavailable_error(
+                &chat_tools,
+                EMAIL_CONNECTOR_SKILL_ID,
+                &[EmailAccountConfig {
+                    email: "a@example.com".into(),
+                    ..Default::default()
+                }],
+                false,
+                "himalaya",
+            )
+            .as_deref(),
+            Some("Skill is disabled in Settings: himalaya")
+        );
+
+        chat_tools.disabled_skill_ids.clear();
+        assert_eq!(
+            skill_global_unavailable_error(
+                &chat_tools,
+                EMAIL_CONNECTOR_SKILL_ID,
+                &[],
+                false,
+                "himalaya"
+            )
+            .as_deref(),
+            Some("Skill requires a configured email connector: himalaya")
+        );
+
+        // Obsidian skill without a vault → connector error; with a vault → None.
+        assert_eq!(
+            skill_global_unavailable_error(
+                &chat_tools,
+                "obsidian-markdown",
+                &[],
+                false,
+                "obsidian-markdown"
+            )
+            .as_deref(),
+            Some("Skill requires a configured Obsidian connector: obsidian-markdown")
+        );
+        assert_eq!(
+            skill_global_unavailable_error(
+                &chat_tools,
+                "obsidian-markdown",
+                &[],
+                true,
+                "obsidian-markdown"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn sanitize_native_tools_migrates_first_legacy_workspace_root() {
+        let mut settings = Settings::default();
+        settings.chat_tools.native_tools.working_directory.clear();
+        settings.chat_tools.native_tools.workspace_roots = vec![
+            "  C:/legacy/workspace  ".to_string(),
+            "C:/ignored".to_string(),
+        ];
+        let settings = sanitize_settings(settings);
+        assert_eq!(
+            settings.chat_tools.native_tools.working_directory,
+            "C:/legacy/workspace"
+        );
+        assert!(settings.chat_tools.native_tools.workspace_roots.is_empty());
+    }
+
+    #[test]
+    fn sanitize_native_tools_uses_platform_default_when_directory_is_missing() {
+        let mut settings = Settings::default();
+        settings.chat_tools.native_tools.working_directory.clear();
+        settings.chat_tools.native_tools.workspace_roots.clear();
+        let settings = sanitize_settings(settings);
+        assert_eq!(
+            settings.chat_tools.native_tools.working_directory,
+            default_chat_working_directory()
+        );
+    }
+
+    #[test]
+    fn beefex_defaults_use_fresh_workspace_and_disable_updates() {
+        let settings = Settings::default();
+        let workspace = std::path::Path::new(&settings.chat_tools.native_tools.working_directory);
+        assert!(workspace.ends_with(std::path::Path::new("Beefex/workspace")));
+        assert!(!settings.auto_check_update);
+
+        let legacy_missing_field: Settings =
+            serde_json::from_value(serde_json::json!({})).expect("empty settings");
+        assert!(!legacy_missing_field.auto_check_update);
+    }
+}

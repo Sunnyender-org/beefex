@@ -1,0 +1,253 @@
+import { memo, useEffect, useRef, useState } from 'react'
+import { MoreHorizontal } from 'lucide-react'
+import type { ChatProject, ChatSet, ConversationListItem } from './types'
+import type { Lang } from '../settings/i18n'
+import {
+  ConversationContextMenu,
+  type ConversationMenuAnchor,
+} from './ConversationContextMenu'
+
+/** 对话所属分组标签：优先「集 · 名」，否则项目名（按 project_id，退回 folder===项目名）。
+ *  与 Sidebar 搜索弹层的显示逻辑一致。无归属时返回空串。 */
+function conversationFolderLabel(
+  conv: ConversationListItem,
+  projects: ChatProject[],
+  sets: ChatSet[],
+): string {
+  const setId = conv.set_id ?? conv.setId ?? null
+  if (setId) {
+    const setName = sets.find((s) => s.id === setId)?.name
+    if (setName) return `集 · ${setName}`
+  }
+  const projectId = conv.project_id ?? conv.projectId ?? null
+  const project = projectId
+    ? projects.find((p) => p.id === projectId)
+    : projects.find((p) => conv.folder === p.name)
+  return project?.name ?? conv.folder ?? ''
+}
+
+interface ConversationListProps {
+  conversations: ConversationListItem[]
+  currentConversationId?: string
+  generatingConversationIds?: ReadonlySet<string>
+  projects: ChatProject[]
+  sets: ChatSet[]
+  lang: Lang
+  compact?: boolean
+  indent?: boolean
+  showAssistantName?: boolean
+  // 「最近」平铺列表用：在每条对话右侧显示其所属「集 / 项目」标签（与搜索弹层一致）。
+  // 项目/集 tab 的嵌套列表不传（已在该分组下，标签冗余）。
+  showFolderLabel?: boolean
+  onSelectConversation: (id: string) => void
+  onRenameConversation: (id: string, title: string) => Promise<void>
+  onExportConversation: (id: string, title: string) => Promise<void>
+  onDeleteConversation: (id: string) => Promise<void>
+  onMoveConversationToProject: (id: string, projectId: string | undefined) => Promise<void>
+  onMoveConversationToSet: (id: string, setId: string | undefined) => Promise<void>
+}
+
+export const ConversationList = memo(function ConversationList({
+  conversations,
+  currentConversationId,
+  generatingConversationIds = new Set(),
+  projects,
+  sets,
+  lang,
+  compact = false,
+  indent = false,
+  showAssistantName = true,
+  showFolderLabel = false,
+  onSelectConversation,
+  onRenameConversation,
+  onExportConversation,
+  onDeleteConversation,
+  onMoveConversationToProject,
+  onMoveConversationToSet,
+}: ConversationListProps) {
+  const [menuState, setMenuState] = useState<{
+    conversationId: string
+    anchor: ConversationMenuAnchor
+  } | null>(null)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  const menuConversation = menuState
+    ? conversations.find((c) => c.id === menuState.conversationId)
+    : undefined
+
+  useEffect(() => {
+    if (renamingId) {
+      renameInputRef.current?.focus()
+      renameInputRef.current?.select()
+    }
+  }, [renamingId])
+
+  const openMenu = (conversationId: string, button: HTMLButtonElement) => {
+    const rect = button.getBoundingClientRect()
+    setMenuState({
+      conversationId,
+      anchor: { left: rect.right - 200, top: rect.bottom + 4 },
+    })
+  }
+
+  const startRename = (conv: ConversationListItem) => {
+    setRenamingId(conv.id)
+    setRenameDraft(conv.title)
+    setMenuState(null)
+  }
+
+  const commitRename = async (conversationId: string) => {
+    const nextTitle = renameDraft.trim()
+    setRenamingId(null)
+    if (!nextTitle) return
+    const conv = conversations.find((c) => c.id === conversationId)
+    if (!conv || conv.title === nextTitle) return
+    await onRenameConversation(conversationId, nextTitle)
+  }
+
+  if (conversations.length === 0) {
+    return null
+  }
+
+  return (
+    <>
+      <div className={compact ? 'space-y-0.5 py-0.5' : 'space-y-0.5 py-1'}>
+        {conversations.map((conv) => {
+          const active = currentConversationId === conv.id
+          const isGenerating = generatingConversationIds.has(conv.id)
+          const isRenaming = renamingId === conv.id
+          const folderLabel = showFolderLabel ? conversationFolderLabel(conv, projects, sets) : ''
+          // 分支对话：把「（分支）」后缀从可截断的标题里拆出，做成不缩的固定标签，
+          // 避免侧栏窄宽时被省略号吃掉（forked_from 字段判定，不依赖标题文字）。
+          const isFork = Boolean(conv.forked_from ?? conv.forkedFrom)
+          const FORK_SUFFIX = '（分支）'
+          const displayTitle =
+            isFork && conv.title.endsWith(FORK_SUFFIX)
+              ? conv.title.slice(0, -FORK_SUFFIX.length)
+              : conv.title
+
+          if (isRenaming) {
+            return (
+              <div
+                key={conv.id}
+                className={`${indent ? 'pl-8 pr-1' : 'px-1'} py-0.5`}
+              >
+                <input
+                  ref={renameInputRef}
+                  type="text"
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onBlur={() => void commitRename(conv.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      void commitRename(conv.id)
+                    }
+                    if (e.key === 'Escape') {
+                      setRenamingId(null)
+                    }
+                  }}
+                  className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none ring-0 focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100"
+                />
+              </div>
+            )
+          }
+
+          return (
+            <div
+              key={conv.id}
+              className={`group relative flex min-w-0 items-center rounded-lg ${
+                active
+                  ? 'bg-black/[0.07] dark:bg-white/[0.11]'
+                  : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => onSelectConversation(conv.id)}
+                className={`min-w-0 flex-1 text-left transition-colors ${
+                  compact
+                    ? `${indent ? 'pl-8' : 'pl-2.5'} pr-2 py-1 text-[13px] leading-5`
+                    : 'px-3 py-2 text-[13px]'
+                } ${
+                  active
+                    ? 'font-semibold text-neutral-900 dark:text-neutral-100'
+                    : compact
+                      ? 'font-medium text-neutral-700 dark:text-neutral-300'
+                      : 'text-neutral-700 dark:text-neutral-300'
+                }`}
+                title={isGenerating ? `${conv.title}（正在生成…）` : conv.title}
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="block min-w-0 flex-1 truncate">{displayTitle}</span>
+                  {isFork && (
+                    <span
+                      className="shrink-0 text-[11px] font-normal text-neutral-400 dark:text-neutral-500"
+                      title="分叉自其它对话"
+                    >
+                      （分支）
+                    </span>
+                  )}
+                  {folderLabel && (
+                    <span
+                      className="max-w-[96px] shrink-0 truncate text-[11px] font-normal text-neutral-400 dark:text-neutral-500"
+                      title={folderLabel}
+                    >
+                      {folderLabel}
+                    </span>
+                  )}
+                  {isGenerating && (
+                    <span
+                      className="inline-flex h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-[1.5px] border-neutral-300 border-t-neutral-600 dark:border-neutral-600 dark:border-t-neutral-200"
+                      aria-label="正在生成"
+                    />
+                  )}
+                </span>
+                {showAssistantName && (conv.assistant_name ?? conv.assistantName) && (
+                  <span className="mt-0.5 block truncate text-[11px] font-normal text-neutral-400 dark:text-neutral-500">
+                    {(conv.assistant_name ?? conv.assistantName)}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  openMenu(conv.id, e.currentTarget)
+                }}
+                className={`mr-1 shrink-0 rounded-md p-0.5 text-neutral-400 transition-opacity hover:bg-black/[0.06] hover:text-neutral-600 dark:hover:bg-white/[0.1] dark:hover:text-neutral-200 ${
+                  menuState?.conversationId === conv.id
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover:opacity-100'
+                }`}
+                aria-label="对话操作"
+              >
+                <MoreHorizontal size={15} />
+              </button>
+            </div>
+          )
+        })}
+      </div>
+
+      {menuState && menuConversation && (
+        <ConversationContextMenu
+          anchor={menuState.anchor}
+          conversationFolder={menuConversation.folder}
+          conversationProjectId={menuConversation.project_id ?? menuConversation.projectId ?? null}
+          conversationSetId={menuConversation.set_id ?? menuConversation.setId ?? null}
+          projects={projects}
+          sets={sets}
+          lang={lang}
+          onRename={() => startRename(menuConversation)}
+          onExport={() => void onExportConversation(menuConversation.id, menuConversation.title)}
+          onMoveToProject={(projectId) => void onMoveConversationToProject(menuConversation.id, projectId)}
+          onMoveToSet={(setId) => void onMoveConversationToSet(menuConversation.id, setId)}
+          onDelete={() => void onDeleteConversation(menuConversation.id)}
+          onClose={() => setMenuState(null)}
+        />
+      )}
+    </>
+  )
+})

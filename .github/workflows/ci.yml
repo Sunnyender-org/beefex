@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  quality:
+    # macOS arm64 is the current supported development target. The public workflow
+    # runs checks only; it does not deploy, sign, notarize, or publish binaries.
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm run test
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # tauri-build validates the target-specific external sidecar before Rust tests.
+      - name: Build Swift sidecar
+        run: npm run build:swift
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
