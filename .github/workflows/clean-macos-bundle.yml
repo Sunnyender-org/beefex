@@ -41,6 +41,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build Swift sidecar
+        run: npm run build:swift
+
       - name: Build unsigned app bundle
         run: npm run tauri -- build --bundles app --no-sign --ci
 
