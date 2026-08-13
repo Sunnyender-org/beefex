@@ -59,6 +59,9 @@ npm run build
 ```
 
 No deployment, signing, notarization, or release is performed by the public CI workflow.
+The manually triggered clean macOS bundle workflow builds an unsigned app on a fresh
+GitHub-hosted Apple Silicon runner, verifies the bundled Pi runtime and notices, and
+performs an isolated-home startup smoke without uploading the app as an artifact.
 
 ## Security
 

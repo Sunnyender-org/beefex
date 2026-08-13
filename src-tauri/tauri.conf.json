@@ -39,6 +39,8 @@
       "binaries/kivio-ocr-helper"
     ],
     "resources": {
+      "../LICENSE": "LICENSE",
+      "../NOTICE": "NOTICE",
       "resources/skills": "skills",
       "resources/pi": "pi"
     },
