@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Unsigned Alpha prerelease tag (for example v0.1.0-alpha.1)'
+        description: 'Unsigned Alpha prerelease tag (for example v0.1.0-alpha.2)'
         required: true
-        default: 'v0.1.0-alpha.1'
+        default: 'v0.1.0-alpha.2'
       ref:
         description: 'Public source ref to build'
         required: true
@@ -64,6 +64,9 @@ jobs:
       - name: Build unsigned production app
         run: npm run tauri -- build --bundles app --no-sign --ci
 
+      - name: Install DMG layout tool
+        run: brew install create-dmg
+
       - name: Verify clean bundle
         run: |
           scripts/verify-clean-macos-bundle.sh \
@@ -78,29 +81,12 @@ jobs:
 
           app='src-tauri/target/release/bundle/macos/Beefex.app'
           release_dir="$RUNNER_TEMP/beefex-release"
-          dmg_root="$RUNNER_TEMP/beefex-dmg-root"
           dmg="$release_dir/beefex-desktop-mac-arm64.dmg"
 
-          mkdir -p "$release_dir" "$dmg_root"
-          ditto "$app" "$dmg_root/Beefex.app"
-          ln -s /Applications "$dmg_root/Applications"
-          cp docs/UNSIGNED_MACOS_ALPHA_INSTALL.txt "$dmg_root/Fix-Damage.txt"
-
+          mkdir -p "$release_dir"
           build_sha="$(git rev-parse HEAD)"
-          printf '%s\n' \
-            "Beefex ${RELEASE_TAG}" \
-            "source_commit=${build_sha}" \
-            'platform=macOS arm64' \
-            'runtime=Pi 0.84.1' \
-            'signature=unsigned-unnotarized-alpha' \
-            > "$dmg_root/BUILD-INFO.txt"
-
-          hdiutil create \
-            -volname "Beefex ${RELEASE_TAG}" \
-            -srcfolder "$dmg_root" \
-            -ov \
-            -format UDZO \
-            "$dmg"
+          scripts/package-macos-alpha-dmg.sh "$app" "$dmg" "$RELEASE_TAG"
+          scripts/verify-macos-alpha-dmg.sh "$dmg"
 
           (
             cd "$release_dir"
@@ -112,7 +98,7 @@ jobs:
             --arg source_commit "$build_sha" \
             --arg artifact 'beefex-desktop-mac-arm64.dmg' \
             --arg sha256 "$(cut -d' ' -f1 "$release_dir/SHA256SUMS.txt")" \
-            '{schema_version:"beefex.alpha-artifact.v1",tag:$tag,source_commit:$source_commit,artifact:$artifact,sha256:$sha256,platform:"macOS arm64",runtime:"Pi 0.84.1",signed:false,notarized:false}' \
+            '{schema_version:"beefex.alpha-artifact.v1",tag:$tag,source_commit:$source_commit,artifact:$artifact,sha256:$sha256,platform:"macOS arm64",runtime:"Pi 0.84.1",layout:"finder-drag-drop-v1",signed:false,notarized:false}' \
             > "$release_dir/beefex-alpha-artifact.json"
 
           hdiutil verify "$dmg"
@@ -150,7 +136,9 @@ jobs:
             '- Status: unsigned and not notarized; this is not a general-production release' \
             '- Windows is not included in the v0.1 macOS Alpha gate' \
             '' \
-            'After dragging Beefex.app to Applications, try right-click → Open. If macOS still blocks this explicitly trusted Alpha build, run:' \
+            'The DMG includes a fixed drag-to-Applications layout and `安装前请看我.txt` with manual and Agent-assisted test-install instructions.' \
+            '' \
+            'After dragging Beefex.app to Applications, try right-click → Open. If macOS still blocks this explicitly trusted test build, run:' \
             '' \
             '```sh' \
             'xattr -rd com.apple.quarantine "/Applications/Beefex.app"' \

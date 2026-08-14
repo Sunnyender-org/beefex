@@ -1,47 +1,70 @@
-Beefex macOS Alpha installation (Apple Silicon)
-================================================
+Beefex 测试版，安装前请看我
+============================
 
-中文
-----
+这是用于测试和验收的 Apple Silicon 版本，尚未使用 Apple Developer ID
+签名，也尚未经过 Apple 公证。请只在确认安装包来自以下任一地址时继续：
 
-这个 Beefex Alpha 包用于 Lucas 的干净 Mac 验收。它包含 Pi 0.84.1，
-但目前尚未使用 Apple Developer ID 签名，也未经过 Apple 公证。
+- https://beefapi.com/download
+- https://github.com/Sunnyender-org/beefex/releases
 
-1. 打开 DMG，把 Beefex.app 拖入 Applications（应用程序）。
-2. 在“应用程序”中右键 Beefex，选择“打开”。
-3. 如果 macOS 仍提示“已损坏”或“无法验证开发者”，仅在你确认下载来源为
-   BeefAPI / Sunnyender-org 后，打开 Terminal 执行：
 
-   xattr -rd com.apple.quarantine "/Applications/Beefex.app"
+安装步骤
+--------
 
-   如果出现 Permission denied，再执行：
+1. 把本窗口里的 Beefex.app 拖到右侧 Applications 文件夹。
+2. 打开“应用程序”，右键 Beefex，选择“打开”。
+3. 如果 macOS 仍提示“已损坏”或“无法验证开发者”，任选下面一种方式。
 
-   sudo xattr -rd com.apple.quarantine "/Applications/Beefex.app"
+
+方式一，把下面这段完整内容交给你信任的本机 Agent
+--------------------------------------------------
+
+请帮我完成 Beefex 测试版的首次打开检查。
+
+安全边界：
+- 只允许检查和处理 /Applications/Beefex.app。
+- 如果应用不存在，告诉我先从已打开的 DMG 拖入 Applications，不要自行下载。
+- 先检查 com.apple.quarantine；如存在，只对 Beefex.app 执行：
+  /usr/bin/xattr -rd com.apple.quarantine "/Applications/Beefex.app"
+- 然后尝试打开 Beefex.app，并把结果告诉我。
+- 不得关闭全局 Gatekeeper，不得执行 spctl --master-disable，不得修改其他应用。
+- 不要自行使用 sudo；如果遇到权限错误，停下来让我确认。
+
+
+方式二，自己在终端执行
+----------------------
+
+打开“终端”，复制下面这一行并按回车：
+
+    /usr/bin/xattr -rd com.apple.quarantine "/Applications/Beefex.app"
+
+然后回到“应用程序”，再次打开 Beefex。
 
 这条命令只清除 Beefex.app 的下载隔离标记，不会关闭全局 Gatekeeper。
-正式公开版仍需要 Developer ID 签名与 Apple 公证。
+如果出现 Permission denied，请不要继续尝试其他系统命令，把错误截图发给测试负责人。
 
-验收请覆盖：BeefAPI 登录、选择模型、新建项目和 Task、Pi 写文件、Pi 执行
-bash、限定范围审批、非空 diff/命令输出/completion receipt、退出重开恢复
-同一 Task，以及 logout 后凭据删除。
 
+验收范围
+--------
+
+BeefAPI 登录、选择模型、新建项目和 Task、Pi 写文件、Pi 执行 bash、限定范围
+审批、非空 diff/命令输出/completion receipt、退出重开恢复同一 Task，以及
+logout 后凭据删除。
+
+
+================================================================
 English
--------
+================================================================
 
-This Beefex Alpha build is for Lucas clean-Mac acceptance. It bundles Pi 0.84.1,
-but it is not yet signed with an Apple Developer ID or notarized by Apple.
+This is an unsigned and unnotarized Apple Silicon test build. Continue only if
+the DMG came from beefapi.com/download or Sunnyender-org/beefex on GitHub.
 
-1. Open the DMG and drag Beefex.app to Applications.
+1. Drag Beefex.app to Applications.
 2. In Applications, right-click Beefex and choose Open.
-3. If macOS still reports that the app is damaged or cannot verify the developer,
-   and you have confirmed the download came from BeefAPI / Sunnyender-org, run:
+3. If macOS still blocks the app, run:
 
-   xattr -rd com.apple.quarantine "/Applications/Beefex.app"
+    /usr/bin/xattr -rd com.apple.quarantine "/Applications/Beefex.app"
 
-   If Terminal reports Permission denied, run:
-
-   sudo xattr -rd com.apple.quarantine "/Applications/Beefex.app"
-
-This clears quarantine only for Beefex.app. It does not disable Gatekeeper
-globally. A general public release still requires Developer ID signing and Apple
-notarization.
+This command clears quarantine only for Beefex.app. It does not disable
+Gatekeeper globally. Do not run spctl --master-disable. If a permission error
+appears, stop and contact the test owner.
