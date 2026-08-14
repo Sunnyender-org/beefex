@@ -1,0 +1,178 @@
+name: Publish macOS Alpha
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Unsigned Alpha prerelease tag (for example v0.1.0-alpha.1)'
+        required: true
+        default: 'v0.1.0-alpha.1'
+      ref:
+        description: 'Public source ref to build'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-macos-alpha-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Validate release inputs
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v0\.1\.0-alpha\.[0-9]+$ ]]
+
+      - name: Checkout public source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Verify clean runner architecture
+        run: test "$(uname -m)" = arm64
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Swift sidecar
+        run: npm run build:swift
+
+      - name: Build unsigned production app
+        run: npm run tauri -- build --bundles app --no-sign --ci
+
+      - name: Verify clean bundle
+        run: |
+          scripts/verify-clean-macos-bundle.sh \
+            src-tauri/target/release/bundle/macos/Beefex.app
+
+      - name: Package Lucas acceptance DMG
+        id: package
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          app='src-tauri/target/release/bundle/macos/Beefex.app'
+          release_dir="$RUNNER_TEMP/beefex-release"
+          dmg_root="$RUNNER_TEMP/beefex-dmg-root"
+          dmg="$release_dir/beefex-desktop-mac-arm64.dmg"
+
+          mkdir -p "$release_dir" "$dmg_root"
+          ditto "$app" "$dmg_root/Beefex.app"
+          ln -s /Applications "$dmg_root/Applications"
+          cp docs/UNSIGNED_MACOS_ALPHA_INSTALL.txt "$dmg_root/Fix-Damage.txt"
+
+          build_sha="$(git rev-parse HEAD)"
+          printf '%s\n' \
+            "Beefex ${RELEASE_TAG}" \
+            "source_commit=${build_sha}" \
+            'platform=macOS arm64' \
+            'runtime=Pi 0.84.1' \
+            'signature=unsigned-unnotarized-alpha' \
+            > "$dmg_root/BUILD-INFO.txt"
+
+          hdiutil create \
+            -volname "Beefex ${RELEASE_TAG}" \
+            -srcfolder "$dmg_root" \
+            -ov \
+            -format UDZO \
+            "$dmg"
+
+          (
+            cd "$release_dir"
+            shasum -a 256 beefex-desktop-mac-arm64.dmg > SHA256SUMS.txt
+          )
+
+          jq -n \
+            --arg tag "$RELEASE_TAG" \
+            --arg source_commit "$build_sha" \
+            --arg artifact 'beefex-desktop-mac-arm64.dmg' \
+            --arg sha256 "$(cut -d' ' -f1 "$release_dir/SHA256SUMS.txt")" \
+            '{schema_version:"beefex.alpha-artifact.v1",tag:$tag,source_commit:$source_commit,artifact:$artifact,sha256:$sha256,platform:"macOS arm64",runtime:"Pi 0.84.1",signed:false,notarized:false}' \
+            > "$release_dir/beefex-alpha-artifact.json"
+
+          hdiutil verify "$dmg"
+          echo "release_dir=$release_dir" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$build_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Retain workflow artifact for acceptance
+        uses: actions/upload-artifact@v4
+        with:
+          name: beefex-macos-arm64-unsigned-${{ inputs.tag }}
+          path: |
+            ${{ steps.package.outputs.release_dir }}/beefex-desktop-mac-arm64.dmg
+            ${{ steps.package.outputs.release_dir }}/SHA256SUMS.txt
+            ${{ steps.package.outputs.release_dir }}/beefex-alpha-artifact.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub prerelease mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_DIR: ${{ steps.package.outputs.release_dir }}
+          SOURCE_COMMIT: ${{ steps.package.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+
+          notes="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n' \
+            '# Beefex macOS Alpha' \
+            '' \
+            'Unsigned Apple Silicon build for Lucas clean-machine acceptance.' \
+            '' \
+            '- Product runtime: bundled Pi 0.84.1' \
+            "- Public source commit: ${SOURCE_COMMIT}" \
+            '- Status: unsigned and not notarized; this is not a general-production release' \
+            '- Windows is not included in the v0.1 macOS Alpha gate' \
+            '' \
+            'After dragging Beefex.app to Applications, try right-click → Open. If macOS still blocks this explicitly trusted Alpha build, run:' \
+            '' \
+            '```sh' \
+            'xattr -rd com.apple.quarantine "/Applications/Beefex.app"' \
+            '```' \
+            '' \
+            'This command clears quarantine only for Beefex.app; it does not disable Gatekeeper globally.' \
+            > "$notes"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "Beefex ${RELEASE_TAG} (unsigned macOS Alpha)" \
+              --notes-file "$notes" \
+              --prerelease
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$SOURCE_COMMIT" \
+              --title "Beefex ${RELEASE_TAG} (unsigned macOS Alpha)" \
+              --notes-file "$notes" \
+              --prerelease
+          fi
+
+          gh release upload "$RELEASE_TAG" --clobber \
+            "$RELEASE_DIR/beefex-desktop-mac-arm64.dmg" \
+            "$RELEASE_DIR/SHA256SUMS.txt" \
+            "$RELEASE_DIR/beefex-alpha-artifact.json"
