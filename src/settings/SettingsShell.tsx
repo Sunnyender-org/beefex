@@ -51,6 +51,7 @@ import { PromptField, ScreenshotTranslationSettings } from './ScreenshotTranslat
 import { initialReplacePackProgressState, reduceReplacePackProgress } from './replacePackProgress'
 import { UsageStatsPanel } from './UsageStatsPanel'
 import { RequestDebugPanel } from './RequestDebugPanel'
+import { DiagnosticsExportPanel } from './DiagnosticsExportPanel'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
 import { Button, IconButton } from '../components/Button'
 import { resolveModelInfo } from '../data/modelMatching'
@@ -4652,6 +4653,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                   <SettingRow label={lang === 'zh' ? '上游项目' : 'Upstream'}>
                     <span className="kv-row-desc">Kivio · GPL-3.0-or-later</span>
                   </SettingRow>
+                </SettingsGroup>
+
+                <SettingsGroup title={lang === 'zh' ? '支持' : 'Support'}>
+                  <DiagnosticsExportPanel lang={lang} />
                 </SettingsGroup>
 
                 <SettingsGroup title={t.checkUpdate}>

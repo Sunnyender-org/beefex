@@ -358,6 +358,29 @@ pub async fn run_external_cli_reply(
         if let Some(commands) = slash::slash_commands_from_event(&event) {
             state.set_cached_external_slash_commands(slash_cache_key.clone(), commands);
         }
+        if def.stream_format == StreamFormat::PiRpc {
+            if let UnifiedAgentEvent::RuntimeStatus { kind, .. } = &event {
+                let transition = match kind.as_str() {
+                    "auto_retry_start" => Some("retry_started"),
+                    "compaction_start" => Some("compaction_started"),
+                    "summarization_retry_scheduled" => Some("retry_scheduled"),
+                    _ => None,
+                };
+                if let Some(transition) = transition {
+                    let mut diagnostic_roots = crate::diagnostics::default_private_roots();
+                    diagnostic_roots.push(cwd.clone());
+                    crate::diagnostics::record_app_event(
+                        app,
+                        crate::diagnostics::DiagnosticKind::PiChildLifecycle,
+                        crate::diagnostics::DiagnosticLevel::Info,
+                        transition,
+                        None,
+                        Some("pi_actor_progress"),
+                        &diagnostic_roots,
+                    );
+                }
+            }
+        }
         apply_unified_event(
             app,
             &conversation_id,
@@ -391,6 +414,20 @@ pub async fn run_external_cli_reply(
     let stderr_task = spawned_opt
         .as_mut()
         .map(|spawned| drain_stderr(&mut spawned.child));
+
+    if def.stream_format == StreamFormat::PiRpc && resume_ctx.is_resuming {
+        let mut diagnostic_roots = crate::diagnostics::default_private_roots();
+        diagnostic_roots.push(cwd.clone());
+        crate::diagnostics::record_app_event(
+            app,
+            crate::diagnostics::DiagnosticKind::TaskRecovery,
+            crate::diagnostics::DiagnosticLevel::Info,
+            "resume_requested",
+            None,
+            Some("pi_session_resume_requested"),
+            &diagnostic_roots,
+        );
+    }
 
     let read_result = if def.stream_format == StreamFormat::PiRpc {
         run_persistent_pi_turn(
@@ -664,6 +701,46 @@ pub async fn run_external_cli_reply(
 
     save_conversation(app, conversation)?;
     state.set_chat_run_status(&conversation_id, &run_id, terminal_status);
+    if def.stream_format == StreamFormat::PiRpc {
+        let mut diagnostic_roots = crate::diagnostics::default_private_roots();
+        diagnostic_roots.push(cwd.clone());
+        let (level, transition) = match terminal_status {
+            ChatRunStatus::Completed => (crate::diagnostics::DiagnosticLevel::Info, "completed"),
+            ChatRunStatus::Cancelled => (crate::diagnostics::DiagnosticLevel::Info, "cancelled"),
+            ChatRunStatus::Failed | ChatRunStatus::Interrupted => {
+                (crate::diagnostics::DiagnosticLevel::Error, "failed")
+            }
+            _ => (crate::diagnostics::DiagnosticLevel::Warn, "terminal"),
+        };
+        crate::diagnostics::record_app_event(
+            app,
+            crate::diagnostics::DiagnosticKind::RunTerminal,
+            level,
+            transition,
+            None,
+            Some(&stream_outcome),
+            &diagnostic_roots,
+        );
+        if resume_ctx.is_resuming {
+            crate::diagnostics::record_app_event(
+                app,
+                crate::diagnostics::DiagnosticKind::TaskRecovery,
+                level,
+                if terminal_status == ChatRunStatus::Completed {
+                    "recovered"
+                } else {
+                    "recovery_failed"
+                },
+                None,
+                Some(if terminal_status == ChatRunStatus::Completed {
+                    "pi_session_recovered"
+                } else {
+                    "pi_session_recovery_failed"
+                }),
+                &diagnostic_roots,
+            );
+        }
+    }
     Ok(ExternalRunOutcome {
         run_id,
         status: terminal_status,
@@ -891,6 +968,17 @@ where
                 env.insert("BEEFEX_PI_MODEL".to_string(), broker.model().to_string());
                 let def = get_agent_def("pi").ok_or_else(|| "Pi runtime missing".to_string())?;
                 let spawned = spawn_agent(def, resolved_bin, args, cwd, &env).await?;
+                let mut diagnostic_roots = crate::diagnostics::default_private_roots();
+                diagnostic_roots.push(cwd.to_path_buf());
+                crate::diagnostics::record_app_event(
+                    app,
+                    crate::diagnostics::DiagnosticKind::PiChildLifecycle,
+                    crate::diagnostics::DiagnosticLevel::Info,
+                    "spawned",
+                    None,
+                    Some("pi_child_spawned"),
+                    &diagnostic_roots,
+                );
                 let client = PiRpcClient::connect(spawned.child, Some(broker)).await?;
                 let session_state = client.session_state().clone();
                 crate::external_agents::session::save_session(
@@ -955,6 +1043,39 @@ where
                     emit(event);
                 }
                 let outcome = result.unwrap_or_else(|_| Err("Pi Task actor dropped".to_string()));
+                let mut diagnostic_roots = crate::diagnostics::default_private_roots();
+                diagnostic_roots.push(cwd.to_path_buf());
+                let (level, transition, message_code) = match &outcome {
+                    Ok(()) => (
+                        crate::diagnostics::DiagnosticLevel::Info,
+                        "settled",
+                        "pi_actor_settled",
+                    ),
+                    Err(error) if error.contains("eof") => (
+                        crate::diagnostics::DiagnosticLevel::Error,
+                        "eof",
+                        "pi_child_eof",
+                    ),
+                    Err(error) if error.contains("child_exit") => (
+                        crate::diagnostics::DiagnosticLevel::Error,
+                        "child_exit",
+                        "pi_child_exit",
+                    ),
+                    Err(_) => (
+                        crate::diagnostics::DiagnosticLevel::Error,
+                        "failed",
+                        "pi_actor_failed",
+                    ),
+                };
+                crate::diagnostics::record_app_event(
+                    app,
+                    crate::diagnostics::DiagnosticKind::PiChildLifecycle,
+                    level,
+                    transition,
+                    None,
+                    Some(message_code),
+                    &diagnostic_roots,
+                );
                 if matches!(&outcome, Err(error) if error != "cancelled") {
                     state.remove_external_live_session(conversation_id);
                 }

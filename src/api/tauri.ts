@@ -1544,6 +1544,30 @@ export type BeefApiAccountState = {
   reason?: string
 }
 
+export type RendererDiagnosticInput = {
+  transition: 'window_error' | 'unhandled_rejection'
+  errorClass: string
+  messageCode: string
+}
+
+export type DiagnosticsPreview = {
+  categories: string[]
+  excludedCategories: string[]
+  fileCount: number
+  approximateBytes: number
+  appVersion: string
+  firstTimestamp: string | null
+  lastTimestamp: string | null
+  skippedRecords: number
+}
+
+export type DiagnosticsExportReceipt = {
+  path: string
+  archiveBytes: number
+  inventory: string[]
+  manifestSchemaVersion: number
+}
+
 // 事件取消监听函数类型
 type Unlisten = () => void
 
@@ -1563,6 +1587,13 @@ async function on<T>(event: string, handler: (payload: T) => void): Promise<Unli
 // ========== API 导出 ==========
 
 export const api = {
+  recordRendererDiagnostic: (input: RendererDiagnosticInput) =>
+    invoke<void>('diagnostics_record_renderer_error', { input }),
+  previewDiagnosticsExport: () =>
+    invoke<DiagnosticsPreview>('diagnostics_preview_export'),
+  exportDiagnostics: (path: string) =>
+    invoke<DiagnosticsExportReceipt>('diagnostics_export', { path }),
+
   // BeefAPI managed account. These commands expose safe account state only.
   beefapiAccountState: () => invoke<BeefApiAccountState>('beefapi_account_state'),
   beefapiAccountReconnect: () => invoke<BeefApiAccountState>('beefapi_account_reconnect'),

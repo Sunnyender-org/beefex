@@ -8,6 +8,7 @@ pub mod chat;
 pub mod cli_install;
 pub mod commands;
 pub mod connectors;
+pub mod diagnostics;
 pub mod external_agents;
 pub mod inpainting;
 pub mod kivio_code;
@@ -39,6 +40,7 @@ pub mod windows;
 #[cfg(target_os = "windows")]
 pub mod windows_ocr;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::{Emitter, Manager, State};
@@ -202,6 +204,32 @@ pub fn run() {
         })
         .setup(|app| {
             let launched_from_autostart = std::env::args().any(|arg| arg == AUTOSTART_ARG);
+
+            let diagnostics_root = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .join("diagnostics");
+            let _ = diagnostics::cleanup_existing_store(&diagnostics_root);
+            let _ = app
+                .handle()
+                .plugin(diagnostics::build_log_plugin(diagnostics_root.clone()));
+            let diagnostics = Arc::new(diagnostics::DiagnosticsService::new(
+                diagnostics_root,
+                app.package_info().version.to_string(),
+                diagnostics::platform_version(),
+            ));
+            diagnostics::install_panic_hook(Arc::clone(&diagnostics));
+            app.manage(diagnostics);
+            diagnostics::record_app_event(
+                app.handle(),
+                diagnostics::DiagnosticKind::Startup,
+                diagnostics::DiagnosticLevel::Info,
+                "setup_started",
+                None,
+                Some("app_setup_started"),
+                &diagnostics::default_private_roots(),
+            );
 
             // Windows：退出后台执行速度节流（EcoQoS）。本应用所有窗口都可关闭（关闭即销毁,
             // 空闲降到 ~50MB），无窗口时进程会被 Win11 当后台空闲进程节流,饿死全局热键的
@@ -451,9 +479,21 @@ pub fn run() {
                     }
                 });
             }
+            diagnostics::record_app_event(
+                app.handle(),
+                diagnostics::DiagnosticKind::Startup,
+                diagnostics::DiagnosticLevel::Info,
+                "setup_ready",
+                None,
+                Some("app_setup_ready"),
+                &diagnostics::default_private_roots(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            diagnostics::diagnostics_record_renderer_error,
+            diagnostics::diagnostics_preview_export,
+            diagnostics::diagnostics_export,
             beefapi::account::beefapi_account_state,
             beefapi::account::beefapi_account_reconnect,
             beefapi::account::beefapi_auth_start,

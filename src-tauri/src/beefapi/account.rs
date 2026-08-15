@@ -866,6 +866,23 @@ pub(crate) async fn beefapi_logout(
 }
 
 pub(crate) fn emit_account_state(app: &AppHandle, state: &AccountState) {
+    let transition = format!("{:?}", state.phase).to_ascii_lowercase();
+    crate::diagnostics::record_app_event(
+        app,
+        crate::diagnostics::DiagnosticKind::AccountTransition,
+        if matches!(
+            state.phase,
+            AccountPhase::CredentialStoreFailed | AccountPhase::CleanupRequired
+        ) {
+            crate::diagnostics::DiagnosticLevel::Error
+        } else {
+            crate::diagnostics::DiagnosticLevel::Info
+        },
+        &transition,
+        None,
+        state.reason.as_deref(),
+        &crate::diagnostics::default_private_roots(),
+    );
     let _ = app.emit("beefapi-account-state", state);
 }
 
