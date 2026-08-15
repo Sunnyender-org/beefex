@@ -1213,7 +1213,7 @@ mod tests {
                         "type": "function",
                         "function": {
                             "name": "web_search",
-                            "arguments": "{\"query\":\"kivio\"}"
+                            "arguments": "{\"query\":\"beefex\"}"
                         }
                     }]
                 }

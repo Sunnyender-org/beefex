@@ -15,7 +15,7 @@
 //! - **Windows**: a GUI program inherits its environment from `explorer.exe`,
 //!   whose environment is a **snapshot taken at login**. A user who installs a
 //!   CLI (mutating the registry `Path`) but doesn't log out/reboot leaves
-//!   `explorer` — and any Kivio it launches — with a *stale* `PATH` that lacks
+//!   `explorer` — and any Beefex it launches — with a *stale* `PATH` that lacks
 //!   the new directory, so `where <cli>` finds nothing. (Developers who've
 //!   rebooted don't see this — "works on my machine".) [`enrich_path_windows`]
 //!   reads the **current** `Path` straight from the registry (user + system
@@ -307,7 +307,7 @@ fn is_drive_rooted(s: &str) -> bool {
 ///
 /// This works around the stale-`PATH`-snapshot problem (see module docs): a
 /// user who installs a CLI but hasn't logged out/rebooted has an `explorer`
-/// environment — and thus a Kivio process — whose `PATH` predates the install.
+/// environment — and thus a Beefex process — whose `PATH` predates the install.
 /// Reading the registry gives us the *current* value. Read-only (never writes
 /// the registry), never panics, never blocks; on any failure it still merges
 /// in the common-directory defaults.

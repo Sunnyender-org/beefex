@@ -46,7 +46,7 @@ import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
 import { compareTimelineSegments, groupTimelineSegments, isStandaloneToolCard, segmentToolCallId, summarizeToolGroup, toolRecordId } from './segments'
 import type { TimelineGroupItem, ToolGroupIcon } from './segments'
 
-const DIRECT_IMAGE_GENERATION_PENDING = '[[KIVIO_DIRECT_IMAGE_GENERATION_PENDING]]'
+const DIRECT_IMAGE_GENERATION_PENDING = '[[BEEFEX_DIRECT_IMAGE_GENERATION_PENDING]]'
 
 // 模块级稳定引用：内联箭头每次渲染新建会打穿 ChatMarkdown 的 memo（导致公式重渲）。
 const handleChatImageClick = (src: string, alt: string, name?: string) =>
@@ -943,7 +943,7 @@ function MessageBubbleComponent({
     const replyModelTags = (sentModels ?? []).filter((m) => (m.model ?? '').trim().length > 0)
     const showModelTags = replyModelTags.length >= 2
     return (
-      <div className={`group flex justify-end py-2 ${playEntranceAnimation ? 'chat-motion-fade-up' : ''}`}>
+      <div className={`beef-thread-message beef-thread-message--user group flex justify-end py-2 ${playEntranceAnimation ? 'chat-motion-fade-up' : ''}`}>
         <div className={`flex min-w-0 flex-col items-end gap-1 ${isEditing ? 'w-full max-w-full' : 'max-w-[85%]'}`}>
           {showModelTags && (
             <div className="flex flex-wrap items-center justify-end gap-1.5 pr-0.5">
@@ -999,7 +999,7 @@ function MessageBubbleComponent({
             </div>
           ) : (
             hasText && (
-              <div className="rounded-[20px] bg-neutral-100 px-4 py-2.5 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
+              <div className="beef-user-prompt rounded-[4px] px-4 py-2.5">
                 <div className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-relaxed">
                   {message.content}
                 </div>
@@ -1086,7 +1086,7 @@ function MessageBubbleComponent({
   }
 
   return (
-    <div className={`flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-fade-up' : ''}`}>
+    <div className={`beef-thread-message beef-thread-message--agent flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-fade-up' : ''}`}>
       <div className="w-full min-w-0">
         {toolCalls.length > 0 && !isEditing && !hasTimelineSegments && (
           <section

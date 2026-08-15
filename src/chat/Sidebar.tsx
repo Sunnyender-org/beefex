@@ -981,6 +981,14 @@ export const Sidebar = memo(function Sidebar({
           <div className="min-w-0 flex-1" data-tauri-drag-region />
         </div>
 
+      <div className="beef-sidebar-brand" data-tauri-drag-region="false">
+        <span className="beef-sidebar-brand-mark" aria-hidden="true">BF</span>
+        <span className="beef-sidebar-brand-copy">
+          <strong>BEEFEX</strong>
+          <small>PI WORKBENCH</small>
+        </span>
+      </div>
+
       <nav className="shrink-0 space-y-0.5 px-3 pb-2" data-tauri-drag-region="false">
         <NavRow
           icon={<SquarePen size={17} strokeWidth={1.75} />}

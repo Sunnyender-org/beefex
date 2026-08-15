@@ -942,7 +942,7 @@ pub struct DocProcessorProvider {
     pub enabled: bool,
 }
 
-/// 知识库文档处理：Kivio 内置解析 + 可选第三方解析服务及路由策略。
+/// 知识库文档处理：Beefex 内置解析 + 可选第三方解析服务及路由策略。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DocumentProcessingConfig {
@@ -954,7 +954,7 @@ pub struct DocumentProcessingConfig {
     pub rapid_ocr_tier: String,
     /// PDF 处理: "text"(默认,文字层) | "force_ocr"(扫描版重扫——内置未启用,会报错)
     pub pdf_strategy: String,
-    /// "" = Kivio 内置（本地 Rust）；否则为某第三方 provider id
+    /// "" = Beefex 内置（本地 Rust）；否则为某第三方 provider id
     pub active_processor: String,
     /// 内置解析失败（如扫描版 PDF）时自动回退到第一个启用的第三方服务。
     pub fallback_to_third_party: bool,
@@ -1103,7 +1103,7 @@ pub fn email_accounts_system_prompt(
         .filter(|path| !path.is_empty())
         .map(|path| format!("Himalaya binary: {path}"));
     Some(format!(
-        "Configured mailboxes (Himalaya CLI — activate the himalaya skill and use run_command):\n{}\nUse Himalaya installed via the Kivio Email connector, or a system PATH himalaya binary.{}{}",
+        "Configured mailboxes (Himalaya CLI — activate the himalaya skill and use run_command):\n{}\nUse Himalaya installed via the Beefex Email connector, or a system PATH himalaya binary.{}{}",
         lines.join("\n"),
         binary_line
             .as_ref()
@@ -1411,17 +1411,13 @@ pub fn skill_connector_satisfied(
     true
 }
 
-/// Global skill gate: Settings enable list + connector prerequisites + 插件门闸。
-/// 插件附属 skill（如 officecli）仅在对应插件「已安装且启用」时可用。
+/// Global skill gate: Settings enable list + connector prerequisites.
 pub fn skill_globally_available(
     chat_tools: &ChatToolsConfig,
     skill_id: &str,
     email_accounts: &[EmailAccountConfig],
     obsidian_vault_configured: bool,
 ) -> bool {
-    if !crate::plugins::plugin_skill_available(skill_id) {
-        return false;
-    }
     is_skill_enabled(chat_tools, skill_id)
         && skill_connector_satisfied(skill_id, email_accounts, obsidian_vault_configured)
 }
@@ -1434,14 +1430,6 @@ pub fn skill_global_unavailable_error(
     obsidian_vault_configured: bool,
     skill_name: &str,
 ) -> Option<String> {
-    if !crate::plugins::plugin_skill_available(skill_id) {
-        if let Some(plugin_id) = crate::plugins::skill_owned_by_plugin(skill_id) {
-            return Some(format!(
-                "Skill is managed by plugin «{plugin_id}» — enable it in 扩展 → 插件: {skill_name}"
-            ));
-        }
-        return Some(format!("Skill is unavailable: {skill_name}"));
-    }
     if !is_skill_enabled(chat_tools, skill_id) {
         return Some(format!("Skill is disabled in Settings: {skill_name}"));
     }
@@ -2245,7 +2233,7 @@ pub fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), Stri
 
 /**
  * 从存储文件加载设置
- * Beefex 使用全新的 com.beefapi.beefex 命名空间，不读取或迁移 Kivio/KeyLingo 数据。
+ * Beefex 使用全新的 com.beefapi.beefex 命名空间，不读取或迁移 Beefex/KeyLingo 数据。
  */
 pub fn load_settings(app: &AppHandle) -> Settings {
     let store = StoreBuilder::new(app, SETTINGS_STORE).build();
@@ -3780,10 +3768,10 @@ mod tests {
             ..Default::default()
         };
         let prompt =
-            email_accounts_system_prompt(&[account], Some("/opt/kivio/himalaya")).expect("prompt");
+            email_accounts_system_prompt(&[account], Some("/opt/beefex/himalaya")).expect("prompt");
         assert!(prompt.contains("user@example.com"));
-        assert!(prompt.contains("Kivio Email connector"));
-        assert!(prompt.contains("Himalaya binary: /opt/kivio/himalaya"));
+        assert!(prompt.contains("Beefex Email connector"));
+        assert!(prompt.contains("Himalaya binary: /opt/beefex/himalaya"));
         assert!(!prompt.contains("brew install"));
 
         let en = email_accounts_system_prompt(
@@ -3794,7 +3782,7 @@ mod tests {
             None,
         )
         .expect("prompt");
-        assert!(en.contains("Kivio Email connector"));
+        assert!(en.contains("Beefex Email connector"));
         assert!(!en.contains("automatically"));
     }
 

@@ -383,8 +383,8 @@ export interface ConversationContextState {
   compactionBoundaries?: CompactionBoundaryRecord[]
   warning?: string | null
   warningMessage?: string | null
-  context_source?: 'kivio_builtin' | 'external_cli' | string
-  contextSource?: 'kivio_builtin' | 'external_cli' | string
+  context_source?: 'beefex_builtin' | 'external_cli' | string
+  contextSource?: 'beefex_builtin' | 'external_cli' | string
   token_count_source?: 'cli_reported' | 'estimated' | 'provider_reported' | string
   tokenCountSource?: 'cli_reported' | 'estimated' | 'provider_reported' | string
   session_input_tokens?: number
@@ -436,21 +436,6 @@ export interface AgentRuntimeConfig {
   external_reasoning?: string | null
   externalSandbox?: string | null
   external_sandbox?: string | null
-}
-
-export interface DetectedExternalAgent {
-  id: string
-  name: string
-  available: boolean
-  path?: string | null
-  version?: string | null
-  models: Array<{ id: string; label: string; contextWindowTokens?: number | null; context_window_tokens?: number | null }>
-  reasoningOptions?: Array<{ id: string; label: string }>
-  reasoning_options?: Array<{ id: string; label: string }>
-  sandboxOptions?: Array<{ id: string; label: string }>
-  sandbox_options?: Array<{ id: string; label: string }>
-  authStatus?: string | null
-  auth_status?: string | null
 }
 
 export interface Conversation {

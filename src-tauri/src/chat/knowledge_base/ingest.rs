@@ -192,7 +192,7 @@ async fn index_one(app: &AppHandle, kb_id: &str, doc_id: &str) -> Result<usize, 
 /// read-modify-write over its JSON files (docs/chunks/library counts), so all
 /// index writes for one kb must be serialized or concurrent uploads silently
 /// overwrite each other's chunks (lost update).
-/// ponytail: process-global registry of per-kb locks. Kivio is a single-user
+/// ponytail: process-global registry of per-kb locks. Beefex is a single-user
 /// desktop app; a global map keyed by kb_id is enough — no AppState field, no
 /// 3-constructor churn. Move into AppState if this ever needs per-window scope.
 fn kb_lock_for(kb_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
@@ -331,7 +331,7 @@ pub(crate) async fn kb_import_url(
             state
                 .http
                 .get(&url)
-                .header("User-Agent", "Mozilla/5.0 (compatible; KivioBot/1.0)"),
+                .header("User-Agent", "Mozilla/5.0 (compatible; BeefexBot/1.0)"),
         )
         .send()
         .await

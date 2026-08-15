@@ -13,7 +13,7 @@ export function CompletionReceipt({
   if (files.length === 0 && commands.length === 0) return null
 
   return (
-    <details className="beef-completion-receipt mx-auto mb-2 w-[min(100%-2rem,52rem)] shrink-0 rounded-[6px] border text-[12px] shadow-sm">
+    <details className="beef-completion-receipt mx-auto mb-2 w-[min(100%-2rem,52rem)] shrink-0 rounded-[4px] border text-[12px]">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-medium marker:hidden">
         <CheckCircle2 size={14} className="text-[var(--beef-verified)]" />
         <span>{lang === 'zh' ? '完成回执' : 'Completion receipt'}</span>

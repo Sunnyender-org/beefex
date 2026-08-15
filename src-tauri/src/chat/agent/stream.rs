@@ -432,7 +432,7 @@ fn tool_draft_span_id(round: u32, tool_call_id: &str) -> String {
 
 fn tool_draft_arguments(name: &str, phase: &str, argument_chars: usize) -> String {
     serde_json::json!({
-        "_kivioToolDraft": true,
+        "_beefexToolDraft": true,
         "tool": name,
         "phase": phase,
         "argumentChars": argument_chars,

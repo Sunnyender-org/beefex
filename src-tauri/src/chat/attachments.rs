@@ -116,7 +116,7 @@ pub(crate) fn save_pasted_attachment(
 }
 
 fn write_pasted_attachment_bytes(name: &str, bytes: &[u8]) -> Result<(PathBuf, String), String> {
-    let dir = std::env::temp_dir().join("kivio-chat-paste");
+    let dir = std::env::temp_dir().join("beefex-chat-paste");
     fs::create_dir_all(&dir).map_err(|e| format!("创建临时附件目录失败: {e}"))?;
     let file_name = format!("paste-{}-{}", Uuid::new_v4(), name);
     let path = dir.join(&file_name);
@@ -484,7 +484,7 @@ fn attachment_processing_hint(attachment: &Attachment) -> String {
             "推荐复用现成 `{skill}` Skill：需要读取或分析该文件时，先调用 skill(name=\"{skill}\")，再按该 Skill 的 SKILL.md / reference / scripts 流程处理安全副本路径。"
         )
     } else {
-        "此文件已保存为 Kivio 安全副本；仅在有可用读取工具或对应 Skill 时处理正文。".to_string()
+        "此文件已保存为 Beefex 安全副本；仅在有可用读取工具或对应 Skill 时处理正文。".to_string()
     }
 }
 
@@ -509,7 +509,7 @@ pub(crate) fn compose_user_content_for_api(
         .map(|attachment| {
             let stored_path = stored_attachment_path_for_prompt(attachment, attachment_dir);
             format!(
-                "- {} ({})\n  - 附件 ID：{}\n  - Kivio 安全副本路径：{}\n  - 处理建议：{}",
+                "- {} ({})\n  - 附件 ID：{}\n  - Beefex 安全副本路径：{}\n  - 处理建议：{}",
                 attachment.name,
                 attachment_format_label(attachment),
                 attachment.id,
@@ -652,7 +652,7 @@ mod tests {
         assert!(content.contains("report.PDF"));
         assert!(content.contains("PDF"));
         assert!(content.contains("skill(name=\"pdf\")"));
-        assert!(content.contains("Kivio 安全副本路径"));
+        assert!(content.contains("Beefex 安全副本路径"));
         assert!(content.contains("不要仅凭文件名臆测内容"));
     }
 

@@ -1,5 +1,4 @@
 use crate::chat::Conversation;
-use crate::external_agents::skill_stage::{with_skill_root_preamble, SKILLS_CWD_ALIAS};
 
 pub struct ComposedExternalPrompt {
     pub full_prompt: String,
@@ -21,17 +20,11 @@ pub fn compose_external_prompt(
     conversation: &Conversation,
     daemon_instructions: &str,
     skill_body: Option<&str>,
-    skill_dir: Option<&str>,
-    skill_folder: Option<&str>,
     skip_instructions: bool,
     skip_transcript: bool,
     latest_user_message: &str,
 ) -> ComposedExternalPrompt {
-    let skill_section = match (skill_body, skill_dir, skill_folder) {
-        (Some(body), Some(dir), Some(folder)) => with_skill_root_preamble(body, dir, folder),
-        (Some(body), _, _) => body.to_string(),
-        _ => String::new(),
-    };
+    let skill_section = skill_body.unwrap_or_default().to_string();
 
     let mut instructions_parts = Vec::new();
     if !skip_instructions {
@@ -97,14 +90,8 @@ fn build_transcript_before_latest(
     lines.join("\n\n")
 }
 
-pub fn cwd_hint(cwd: &str, include_host_skill_bridge: bool) -> String {
-    if include_host_skill_bridge {
-        format!(
-            "Your working directory is `{cwd}`. Active skill files may appear under `{SKILLS_CWD_ALIAS}/`."
-        )
-    } else {
-        format!("Your working directory is `{cwd}`.")
-    }
+pub fn cwd_hint(cwd: &str) -> String {
+    format!("Your working directory is `{cwd}`.")
 }
 
 #[cfg(test)]
@@ -154,8 +141,6 @@ mod tests {
             &conv,
             "system rules",
             Some("skill body"),
-            Some("/skills/x"),
-            Some("x-abc"),
             false,
             true,
             "hello",
@@ -190,16 +175,8 @@ mod tests {
             model: None,
             timestamp: 0,
         });
-        let composed = compose_external_prompt(
-            &conv,
-            "system rules",
-            None,
-            None,
-            None,
-            false,
-            false,
-            "hello once",
-        );
+        let composed =
+            compose_external_prompt(&conv, "system rules", None, false, false, "hello once");
         assert_eq!(composed.full_prompt.matches("hello once").count(), 1);
     }
 
@@ -220,8 +197,8 @@ mod tests {
     }
 
     #[test]
-    fn pi_native_prompt_hint_does_not_mention_kivio_skill_staging() {
-        let hint = cwd_hint("/tmp/project", false);
+    fn pi_native_prompt_hint_does_not_mention_legacy_skill_staging() {
+        let hint = cwd_hint("/tmp/project");
         assert_eq!(hint, "Your working directory is `/tmp/project`.");
         assert!(!hint.contains(".kivio"));
         assert!(!hint.contains("skills-staged"));

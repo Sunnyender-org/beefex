@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn resolve_read_path_allows_temp_paths() {
-        let file = std::env::temp_dir().join(format!("kivio_read_{}.txt", uuid::Uuid::new_v4()));
+        let file = std::env::temp_dir().join(format!("beefex_read_{}.txt", uuid::Uuid::new_v4()));
         fs::write(&file, "hello").expect("write temp file");
 
         let resolved = resolve_read_path(&file.to_string_lossy()).expect("resolve read path");
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn resolve_read_path_expands_tilde_home_prefix() {
         let home = user_home_dir().expect("home");
-        let dir = home.join(format!(".kivio_tilde_test_{}", uuid::Uuid::new_v4()));
+        let dir = home.join(format!(".beefex_tilde_test_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("mkdir");
         let file = dir.join("sample.csv");
         fs::write(&file, "alpha,beta").expect("write");
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn resolve_workspace_path_expands_tilde_prefix() {
         let home = user_home_dir().expect("home");
-        let dir = home.join(format!(".kivio_tilde_ws_{}", uuid::Uuid::new_v4()));
+        let dir = home.join(format!(".beefex_tilde_ws_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("mkdir");
         let file = dir.join("note.txt");
         fs::write(&file, "ok").expect("write");
@@ -439,8 +439,10 @@ mod tests {
 
     #[test]
     fn conversation_relative_paths_use_and_create_default_workbench() {
-        let root =
-            std::env::temp_dir().join(format!("kivio_workspace_{}", uuid::Uuid::new_v4().simple()));
+        let root = std::env::temp_dir().join(format!(
+            "beefex_workspace_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let workspace = NativeToolWorkspace::conversation(root.clone());
         assert!(!root.exists());
         let resolved = resolve_tool_write_path(&workspace, "reports/result.txt").expect("resolve");
@@ -454,10 +456,12 @@ mod tests {
 
     #[test]
     fn explicit_absolute_path_does_not_create_conversation_workbench() {
-        let root =
-            std::env::temp_dir().join(format!("kivio_workspace_{}", uuid::Uuid::new_v4().simple()));
+        let root = std::env::temp_dir().join(format!(
+            "beefex_workspace_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let explicit = std::env::temp_dir().join(format!(
-            "kivio_explicit_{}.txt",
+            "beefex_explicit_{}.txt",
             uuid::Uuid::new_v4().simple()
         ));
         let workspace = NativeToolWorkspace::conversation(root.clone());
@@ -472,8 +476,10 @@ mod tests {
 
     #[test]
     fn omitted_command_cwd_creates_and_uses_conversation_workbench() {
-        let root =
-            std::env::temp_dir().join(format!("kivio_workspace_{}", uuid::Uuid::new_v4().simple()));
+        let root = std::env::temp_dir().join(format!(
+            "beefex_workspace_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         let workspace = NativeToolWorkspace::conversation(root.clone());
         let cwd = resolve_tool_existing_dir(&workspace, None).expect("cwd");
         assert_eq!(cwd, fs::canonicalize(&root).unwrap());

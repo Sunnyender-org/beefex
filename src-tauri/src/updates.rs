@@ -10,7 +10,7 @@ use crate::api::with_standard_request_timeout;
 use crate::state::AppState;
 
 // Internal alpha builds have no release channel. A future release build must
-// opt in at compile time instead of inheriting Kivio's update feed.
+// opt in at compile time instead of inheriting legacy upstream's update feed.
 const UPDATE_REPO: Option<&str> = option_env!("BEEFEX_UPDATE_REPO");
 
 /// 检查 GitHub Releases 的最新版本。
@@ -308,7 +308,7 @@ pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<()
         use std::process::Command;
         // 显式指定挂载点（用 UUID 避免与同名 volume 已挂载时的名字冲突）。比解析 `hdiutil attach` 的
         // 默认表格输出鲁棒很多 —— 那个输出列用空格 padding,VolumeName 含空格(如重复挂载产生的
-        // "Kivio 1")会被 split_whitespace 截断。
+        // "legacy upstream 1")会被 split_whitespace 截断。
         let mount_id = Uuid::new_v4().to_string();
         let mount_point = std::env::temp_dir().join(format!("beefex-mount-{mount_id}"));
         fs::create_dir_all(&mount_point).map_err(|e| format!("创建挂载目录失败: {e}"))?;
@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn update_channel_never_inherits_kivio() {
-        assert_ne!(UPDATE_REPO, Some("ZMGID/kivio"));
+    fn update_channel_never_inherits_legacy_upstream() {
+        assert_ne!(UPDATE_REPO, Some("ZMGID/legacy_upstream"));
     }
 }

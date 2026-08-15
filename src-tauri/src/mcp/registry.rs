@@ -470,16 +470,6 @@ pub async fn call_tool(
         )
         .await;
     }
-    // OfficeCLI 插件：文档写/改成功后默认拉起 live preview（浏览器实时看）
-    if let Some(note) =
-        crate::plugins::note_after_officecli_tool(app, state, tool, &arguments, &result)
-    {
-        if result.content.trim().is_empty() {
-            result.content = note;
-        } else {
-            result.content = format!("{}\n\n{note}", result.content.trim_end());
-        }
-    }
     Ok(result)
 }
 
@@ -527,7 +517,8 @@ pub(crate) fn mcp_server_is_runtime_eligible(server: &ChatMcpServer) -> bool {
         .as_deref()
         .and_then(|connector_id| connector_id.strip_prefix("plugin:"))
     {
-        return crate::plugins::is_enabled(plugin_id) && crate::plugins::is_installed(plugin_id);
+        let _ = plugin_id;
+        return false;
     }
     true
 }

@@ -46,7 +46,7 @@ pub(crate) async fn chat_send_message(
     let mut conversation = load_conversation(&app, &conversation_id)?;
     // Beefex has one product runtime. Historical conversations remain readable, but every
     // execution is promoted to the managed BeefAPI + Pi path before slash preprocessing or
-    // persistence, so legacy builtin/Kivio behavior cannot become a hidden fallback.
+    // persistence, so legacy builtin/Beefex behavior cannot become a hidden fallback.
     pin_managed_pi_runtime(&mut conversation);
 
     // Backend slash-trigger preprocessing (承重路径): plain text `/commit msg`

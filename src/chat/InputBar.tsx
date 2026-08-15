@@ -391,7 +391,7 @@ interface InputBarProps {
   autoFocus?: boolean
   /** footer：贴底（有消息时）；inline：嵌入居中区域（空对话欢迎页） */
   layout?: 'footer' | 'inline'
-  /** 外部 CLI 模式：斜杠命令直通 Agent，不展示 Kivio 弹层 */
+  /** 外部 CLI 模式：斜杠命令直通 Agent，不展示 Beefex 弹层 */
   usesExternalRuntime?: boolean
   externalAgentName?: string | null
   conversationId?: string | null
@@ -1566,7 +1566,7 @@ export function InputBar({
         )}
         <div
           data-chat-composer="true"
-          className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-[6px] border px-3 py-2.5 transition-[box-shadow,border-color] duration-200 ${
+          className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-[4px] border px-3 py-2.5 transition-[box-shadow,border-color] duration-200 ${
             dragActive
               ? 'border-[var(--beef-active)] shadow-[0_2px_12px_rgba(0,0,0,0.06)] ring-2 ring-[var(--accent-soft)] dark:border-[var(--beef-active)] dark:shadow-none'
               : agentPlanActive
@@ -1705,7 +1705,7 @@ export function InputBar({
                   onClick={toggleModeMenu}
                   onMouseDown={(event) => event.preventDefault()}
                   disabled={disabled}
-                  className={`inline-flex h-[26px] max-w-full items-center gap-0.5 rounded-full px-1.5 text-left text-[12px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 dark:focus-visible:ring-neutral-600 ${
+                  className={`inline-flex h-[26px] max-w-full items-center gap-0.5 rounded-[2px] px-1.5 text-left text-[12px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 dark:focus-visible:ring-neutral-600 ${
                     modeMenuOpen
                       ? 'bg-neutral-200 text-neutral-800 dark:bg-neutral-700 dark:text-neutral-100'
                       : activeModePillClass.idle
@@ -1786,7 +1786,7 @@ export function InputBar({
                 title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}
                 aria-label={sendDisabledReason || '发送'}
                 aria-hidden={cancelVisible && !!onCancel}
-                className={`absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-spring)] ${
+                className={`absolute inset-0 flex items-center justify-center rounded-[2px] transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-spring)] ${
                   cancelVisible && onCancel
                     ? 'pointer-events-none scale-90 opacity-0'
                     : 'opacity-100'
@@ -1807,7 +1807,7 @@ export function InputBar({
                   disabled={cancelling}
                   tabIndex={cancelVisible ? undefined : -1}
                   aria-hidden={!cancelVisible}
-                  className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white shadow-sm transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
+                  className={`absolute inset-0 flex items-center justify-center rounded-[2px] bg-neutral-900 text-white shadow-sm transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
                     cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
                   }`}
                   title={cancelling ? '正在停止' : '停止生成'}

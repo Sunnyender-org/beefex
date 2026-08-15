@@ -1,4 +1,4 @@
-// Kivio OCR Helper —— 独立的 Apple Vision OCR sidecar。
+// Beefex OCR Helper —— 独立的 Apple Vision OCR sidecar。
 // 协议(每行一条 JSON):
 //   启动: { "type": "ready", "available": Bool }
 //   请求: { "id": Int, "action": "ocr", "imagePath": String }
@@ -63,7 +63,7 @@ func dispatch(_ raw: String) {
 }
 
 @main
-struct KivioOCRHelper {
+struct BeefexOCRHelper {
   static func main() async {
     emit(["type": "ready", "available": true])
     while let line = readLine(strippingNewline: true) {

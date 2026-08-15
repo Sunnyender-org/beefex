@@ -33,8 +33,8 @@ const PYTHON_ARTIFACT_EXTENSIONS = new Set([
   '.xlsx', '.xls',
 ])
 const PYTHON_ARTIFACT_SCAN_ROOTS = ['/home/pyodide', '/tmp']
-const PYTHON_INPUT_SCAN_ROOT = '/home/pyodide/kivio_inputs'
-const PYTHON_FONT_VIRTUAL_DIR = '/home/pyodide/.kivio/fonts'
+const PYTHON_INPUT_SCAN_ROOT = '/home/pyodide/beefex_inputs'
+const PYTHON_FONT_VIRTUAL_DIR = '/home/pyodide/.beefex/fonts'
 const PYTHON_DEFAULT_CJK_FONT = {
   fileName: 'NotoSansCJKsc-Regular.otf',
   family: 'Noto Sans CJK SC',
@@ -217,43 +217,43 @@ async function ensurePythonFontSupport(pyodide: PyodideInterface): Promise<void>
   }
 
   await pyodide.runPythonAsync(`
-import os as _kivio_font_os
+import os as _beefex_font_os
 
-KIVIO_CJK_FONT_PATH = ${pythonStringLiteral(fontPath)}
-KIVIO_CJK_FONT_FAMILY = ${pythonStringLiteral(font?.family ?? '')}
-if KIVIO_CJK_FONT_PATH:
-    _kivio_font_os.environ["KIVIO_CJK_FONT_PATH"] = KIVIO_CJK_FONT_PATH
-    _kivio_font_os.environ["KIVIO_CJK_FONT_FAMILY"] = KIVIO_CJK_FONT_FAMILY
+BEEFEX_CJK_FONT_PATH = ${pythonStringLiteral(fontPath)}
+BEEFEX_CJK_FONT_FAMILY = ${pythonStringLiteral(font?.family ?? '')}
+if BEEFEX_CJK_FONT_PATH:
+    _beefex_font_os.environ["BEEFEX_CJK_FONT_PATH"] = BEEFEX_CJK_FONT_PATH
+    _beefex_font_os.environ["BEEFEX_CJK_FONT_FAMILY"] = BEEFEX_CJK_FONT_FAMILY
 
-def _kivio_configure_matplotlib_fonts():
-    if not KIVIO_CJK_FONT_PATH:
+def _beefex_configure_matplotlib_fonts():
+    if not BEEFEX_CJK_FONT_PATH:
         return None
     try:
-        import matplotlib as _kivio_matplotlib
-        from matplotlib import font_manager as _kivio_font_manager
-        _kivio_font_manager.fontManager.addfont(KIVIO_CJK_FONT_PATH)
-        _kivio_font_name = _kivio_font_manager.FontProperties(fname=KIVIO_CJK_FONT_PATH).get_name()
-        _kivio_font_candidates = [
-            _kivio_font_name,
-            KIVIO_CJK_FONT_FAMILY,
+        import matplotlib as _beefex_matplotlib
+        from matplotlib import font_manager as _beefex_font_manager
+        _beefex_font_manager.fontManager.addfont(BEEFEX_CJK_FONT_PATH)
+        _beefex_font_name = _beefex_font_manager.FontProperties(fname=BEEFEX_CJK_FONT_PATH).get_name()
+        _beefex_font_candidates = [
+            _beefex_font_name,
+            BEEFEX_CJK_FONT_FAMILY,
             "Noto Sans CJK SC",
             "Noto Sans CJK JP",
             "Noto Sans CJK KR",
             "DejaVu Sans",
         ]
-        _kivio_matplotlib.rcParams["font.family"] = [
-            _kivio_name for _kivio_name in _kivio_font_candidates if _kivio_name
+        _beefex_matplotlib.rcParams["font.family"] = [
+            _beefex_name for _beefex_name in _beefex_font_candidates if _beefex_name
         ]
-        _kivio_matplotlib.rcParams["axes.unicode_minus"] = False
-        return _kivio_font_name
+        _beefex_matplotlib.rcParams["axes.unicode_minus"] = False
+        return _beefex_font_name
     except Exception:
         return None
 
-def kivio_cjk_font(size=24):
-    if not KIVIO_CJK_FONT_PATH:
-        raise RuntimeError("KIVIO_CJK_FONT_PATH is unavailable in this Python sandbox.")
-    from PIL import ImageFont as _kivio_image_font
-    return _kivio_image_font.truetype(KIVIO_CJK_FONT_PATH, size)
+def beefex_cjk_font(size=24):
+    if not BEEFEX_CJK_FONT_PATH:
+        raise RuntimeError("BEEFEX_CJK_FONT_PATH is unavailable in this Python sandbox.")
+    from PIL import ImageFont as _beefex_image_font
+    return _beefex_image_font.truetype(BEEFEX_CJK_FONT_PATH, size)
 `.trim())
 }
 
@@ -284,8 +284,8 @@ async function installLocalWheelPackage(
 
     const wheelUrl = localPyodideAssetUrl(wheel.fileName)
     const installWheelCode = `
-import micropip as _kivio_micropip
-await _kivio_micropip.install(${pythonStringLiteral(wheelUrl)}, deps=False)
+import micropip as _beefex_micropip
+await _beefex_micropip.install(${pythonStringLiteral(wheelUrl)}, deps=False)
 `.trim()
     await pyodide.runPythonAsync(installWheelCode)
   } finally {
@@ -315,8 +315,8 @@ async function installPackagesOnRuntime(
 async function installMicropipPackage(pyodide: PyodideInterface, packageName: string): Promise<void> {
   await pyodide.loadPackage('micropip')
   await pyodide.runPythonAsync(`
-import micropip as _kivio_micropip
-await _kivio_micropip.install(${pythonStringLiteral(packageName)})
+import micropip as _beefex_micropip
+await _beefex_micropip.install(${pythonStringLiteral(packageName)})
 `.trim())
 }
 
@@ -405,21 +405,21 @@ function pythonStringLiteral(value: string): string {
 
 export function wrapPythonUserCode(code: string): string {
   return `
-import traceback as _kivio_traceback
-import warnings as _kivio_warnings
+import traceback as _beefex_traceback
+import warnings as _beefex_warnings
 
-for _kivio_warning_category in (
+for _beefex_warning_category in (
     DeprecationWarning,
     PendingDeprecationWarning,
     FutureWarning,
     ResourceWarning,
 ):
-    _kivio_warnings.filterwarnings("ignore", category=_kivio_warning_category)
+    _beefex_warnings.filterwarnings("ignore", category=_beefex_warning_category)
 
 try:
     exec(${pythonStringLiteral(code)}, globals(), globals())
 except BaseException:
-    _kivio_traceback.print_exc()
+    _beefex_traceback.print_exc()
     raise
 `.trim()
 }
@@ -511,11 +511,11 @@ os.environ["MPLBACKEND"] = "Agg"
 import matplotlib
 matplotlib.use("Agg", force=True)
 try:
-    _kivio_configure_matplotlib_fonts()
+    _beefex_configure_matplotlib_fonts()
 except NameError:
     pass
-import matplotlib.pyplot as _kivio_matplotlib_pyplot
-_kivio_matplotlib_pyplot.ioff()
+import matplotlib.pyplot as _beefex_matplotlib_pyplot
+_beefex_matplotlib_pyplot.ioff()
 
 ${code}
 `.trim()
@@ -561,10 +561,10 @@ import os
 os.environ["MPLBACKEND"] = "Agg"
 import matplotlib
 matplotlib.use("Agg", force=True)
-_kivio_configure_matplotlib_fonts()
-import matplotlib.pyplot as _kivio_matplotlib_warmup_pyplot
-_kivio_matplotlib_warmup_pyplot.figure()
-_kivio_matplotlib_warmup_pyplot.close("all")
+_beefex_configure_matplotlib_fonts()
+import matplotlib.pyplot as _beefex_matplotlib_warmup_pyplot
+_beefex_matplotlib_warmup_pyplot.figure()
+_beefex_matplotlib_warmup_pyplot.close("all")
 `.trim())
 }
 
@@ -833,7 +833,7 @@ async function mountPythonInputFiles(
   files: PythonInputFile[] = [],
 ): Promise<string[]> {
   const fs = pyodide.FS as PyodideFs
-  const inputDir = '/home/pyodide/kivio_inputs'
+  const inputDir = '/home/pyodide/beefex_inputs'
   try {
     fs.mkdirTree?.(inputDir)
   } catch {
@@ -849,7 +849,7 @@ async function mountPythonInputFiles(
       }
     }
   } catch {
-    // If cleanup fails, writing fresh numbered inputs below will still reset KIVIO_INPUT_FILES.
+    // If cleanup fails, writing fresh numbered inputs below will still reset BEEFEX_INPUT_FILES.
   }
 
   const mountedPaths: string[] = []
@@ -865,9 +865,9 @@ async function mountPythonInputFiles(
   })
 
   await pyodide.runPythonAsync(`
-KIVIO_INPUT_FILES = ${pythonStringLiteral(JSON.stringify(mountedPaths))}
-import json as _kivio_json
-KIVIO_INPUT_FILES = _kivio_json.loads(KIVIO_INPUT_FILES)
+BEEFEX_INPUT_FILES = ${pythonStringLiteral(JSON.stringify(mountedPaths))}
+import json as _beefex_json
+BEEFEX_INPUT_FILES = _beefex_json.loads(BEEFEX_INPUT_FILES)
 `.trim())
   return mountedPaths
 }

@@ -1299,7 +1299,7 @@ mod tests {
             "content": [
                 {"type": "thinking", "thinking": "Plan"},
                 {"type": "text", "text": "Answer"},
-                {"type": "tool_use", "id": "toolu_1", "name": "web_search", "input": {"query": "kivio"}}
+                {"type": "tool_use", "id": "toolu_1", "name": "web_search", "input": {"query": "beefex"}}
             ],
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 7, "output_tokens": 11}
@@ -1324,7 +1324,7 @@ mod tests {
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_123\",\"name\":\"web_search\",\"input\":{}}}",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\"\"}}",
-            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\"kivio\\\"}\"}}",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\"beefex\\\"}\"}}",
             "data: {\"type\":\"content_block_stop\"}",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}",
         ];
@@ -1361,7 +1361,7 @@ mod tests {
         let call = assemble_tool_call_from_stream("toolu_123", "web_search", &input_parts);
 
         assert_eq!(call.function_name, "web_search");
-        assert_eq!(call.arguments["query"], "kivio");
+        assert_eq!(call.arguments["query"], "beefex");
         assert!(call.arguments_parse_error.is_none());
     }
 }

@@ -80,7 +80,7 @@ pub fn apply_skill_fallback_when_tools_unavailable(
 pub fn available_builtin_tool_names(tools: &[ChatToolDefinition]) -> Vec<String> {
     let mut names = tools
         .iter()
-        .filter(|tool| is_kivio_builtin_tool(tool))
+        .filter(|tool| is_beefex_builtin_tool(tool))
         .map(|tool| tool.name.clone())
         .collect::<Vec<_>>();
     names.sort();
@@ -98,7 +98,7 @@ pub fn disabled_builtin_tool_feedback(function_name: &str) -> Option<String> {
         || EXTRA_BUILTIN_NAMES.contains(&function_name);
     if is_builtin {
         Some(format!(
-            "Kivio tool `{function_name}` is not enabled for this chat. Do not call it again; answer using the available context and enabled tools only."
+            "Beefex tool `{function_name}` is not enabled for this chat. Do not call it again; answer using the available context and enabled tools only."
         ))
     } else {
         None
@@ -110,7 +110,7 @@ pub fn is_native_skill_tool_name(name: &str) -> bool {
     matches!(name, "skill" | "skill_activate")
 }
 
-pub fn is_kivio_builtin_tool(tool: &ChatToolDefinition) -> bool {
+pub fn is_beefex_builtin_tool(tool: &ChatToolDefinition) -> bool {
     matches!(tool.source.as_str(), "native" | "mixer")
         && !is_native_skill_tool_name(&tool.name)
         && !crate::chat::todo::is_agent_todo_tool_name(&tool.name)
@@ -244,7 +244,7 @@ pub fn build_chat_system_prompt_with_segments(
     );
     // 工作方式纪律（始终附加，独立于可被自定义人设覆盖的基座）：对齐 opencode 的
     // Tone/Proactiveness 之「神」——默认简洁、先答后做、不过度、不注水；但刻意不搬其
-    // CLI 硬限制（≤4 行/一个词），保留 Kivio 富文本 GUI 该出的结构化 Markdown/报告能力。
+    // CLI 硬限制（≤4 行/一个词），保留 Beefex 富文本 GUI 该出的结构化 Markdown/报告能力。
     let work_style =
         "How you work: address only the current request — no filler preamble, no wrap-up postamble, no \"here's what I'll do next\" narration; after editing files you don't need to restate what changed (the user can see it). Match length to the task: answer simple questions in a sentence or two, and expand into structured output only for complex or report-style tasks — don't pad to look thorough. When the user only asks how to do something or whether it's possible, answer first; don't jump to making changes, and don't do work they didn't ask for.";
     append_context_segment(
@@ -359,21 +359,6 @@ pub fn build_chat_system_prompt_with_segments(
         );
     }
 
-    // 能力插件：仅「已安装且启用」时注入短 systemHint；关闭则零注入。
-    if let Some(text) = crate::plugins::enabled_system_prompt()
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "runtime_context",
-            "Runtime context",
-            text,
-        );
-    }
-
     if let Some(plan) = agent_plan_prompt
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -441,7 +426,7 @@ pub fn build_chat_system_prompt_with_segments(
             action_examples.join(", ")
         );
         runtime.push_str(
-            " Only claim that a tool was used, a script was run, a file was read, or the web was searched after Kivio returns an actual tool result in the conversation.",
+            " Only claim that a tool was used, a script was run, a file was read, or the web was searched after Beefex returns an actual tool result in the conversation.",
         );
         runtime.push_str(
             " If the user only asks for today/tomorrow/weekday derivable from the system date above, answer directly without calling tools.",
@@ -850,7 +835,7 @@ fn native_tools_prompt(
 - Runtime environment: {os_name}; bash runs via {shell_name}. Match that shell's syntax ({shell_syntax_hint}). Each bash call is a fresh process — cwd does NOT persist across calls; switch directories with the `cwd` parameter, not a prior `cd`. To run multi-line or quoted code, write it to a file with write and run that, or use run_python — do not cram it into inline commands like `python -c \"...\"` (inline quotes are fragile across shells). When a tool returns a hard rejection, change strategy instead of retrying variants of the same action; never re-run a failed command unchanged; don't drop one-off probe or cleanup scripts into the project.\n\
 - bash runs on the host shell from the current default workbench; non-zero exit means failure. Paths with spaces must use the `cwd` parameter—never `cd path && command`; do not combine `cwd` with a leading `cd ... &&` prefix. Long-running dev commands such as `npm run dev`, `tauri dev`, and `vite` start in the background automatically and return a job_id immediately; do not start the same dev server twice. Explain and get confirmation before destructive, network, or environment-changing commands. Run a skill's bundled scripts with run_python (sandbox) or run_command (host); never use host pip to bypass the run_python sandbox.\n\
 - Background commands (bash with background:true, or auto-detected dev servers): the call returns a job_id immediately and hands control back to you — keep working, do NOT poll right away. Read incremental output and exit status with bash_output (pass the job_id; use the returned next_offset for the next read), list all tracked jobs by calling bash_output with no job_id, and stop one with kill_background. Keep polling bounded (≤20 checks); status in history may be stale, so refresh once with bash_output before reporting a background command's result. Background commands survive across turns until you kill them or the app exits, so kill_background a dev server when you no longer need it.\n\
-- run_python runs in a Pyodide sandbox for data computation, analysis, document processing, charts, and generating files that REQUIRE a Python library (formatted XLSX, PDF, rendered images); never use it to generate or print code answers, and do not call it merely to write out content you already have (use write in the current workbench for that). Write code directly in the answer. No host filesystem access; mount files via the files parameter and use KIVIO_INPUT_FILES[n] paths. numpy, pandas, matplotlib, pillow, openpyxl, pypdf import directly. Save artifacts to relative filenames (report.xlsx, chart.png, summary.csv); Kivio captures them and returns artifact IDs. Generated files remain hidden unless you call present_artifacts at the point where the user should see them. No base64 printing.\n\
+- run_python runs in a Pyodide sandbox for data computation, analysis, document processing, charts, and generating files that REQUIRE a Python library (formatted XLSX, PDF, rendered images); never use it to generate or print code answers, and do not call it merely to write out content you already have (use write in the current workbench for that). Write code directly in the answer. No host filesystem access; mount files via the files parameter and use BEEFEX_INPUT_FILES[n] paths. numpy, pandas, matplotlib, pillow, openpyxl, pypdf import directly. Save artifacts to relative filenames (report.xlsx, chart.png, summary.csv); Beefex captures them and returns artifact IDs. Generated files remain hidden unless you call present_artifacts at the point where the user should see them. No base64 printing.\n\
 - {live_access_hint}"
         ) + presentation_hint + &generated_file_hint + image_generation_hint + advisor_hint + code_discipline
     };

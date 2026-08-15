@@ -8,7 +8,6 @@ pub mod prompt;
 pub mod registry;
 pub mod run;
 pub mod session;
-pub mod skill_stage;
 pub mod slash;
 pub mod spawn;
 pub mod stream;

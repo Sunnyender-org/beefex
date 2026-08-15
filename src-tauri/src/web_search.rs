@@ -632,7 +632,7 @@ fn parse_grok_response(value: &serde_json::Value) -> (String, Vec<String>) {
 /// model conversation: a two-line header, then per result a `[N] Title` line, a
 /// `URL: …` line, and optional `Published:` / `Score:` / `Snippet:` lines.
 ///
-/// NOTE: the kivio-code tool card parser (`kivio_code::interactive::tool_card::
+/// NOTE: the beefex-code tool card parser (`beefex_code::interactive::tool_card::
 /// parse_web_results`) depends on this exact line shape — it recognizes `[N] Title`
 /// title lines and the following `URL:` line to render a compact result list.
 /// If you change the per-result format here (reorder lines, drop the `[N]` title

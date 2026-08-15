@@ -516,7 +516,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("kivio_{label}_{}", uuid::Uuid::new_v4().simple()))
+        std::env::temp_dir().join(format!("beefex_{label}_{}", uuid::Uuid::new_v4().simple()))
     }
 
     #[test]

@@ -1402,7 +1402,7 @@ function DefaultToolCallBlock({
   const hasDetails = Boolean(argumentPreview || resultPreview || error || hasFileMutationDetails || knowledgeHits)
 
   return (
-    <div className="not-prose mb-1 text-[12.5px] leading-5 text-neutral-500 dark:text-neutral-400">
+    <div className="beef-tool-record not-prose mb-1 text-[12.5px] leading-5 text-neutral-500 dark:text-neutral-400">
       <button
         type="button"
         onClick={() => {

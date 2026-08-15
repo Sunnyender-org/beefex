@@ -34,9 +34,9 @@ export function ScopedApprovalDialog({
   }, [onReject])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" data-tauri-drag-region="false">
+    <div className="beef-approval-backdrop fixed inset-0 z-50 flex items-center justify-center px-4" data-tauri-drag-region="false">
       <section
-        className="beef-approval-dialog w-full max-w-md rounded-[6px] border p-4 shadow-xl"
+        className="beef-approval-dialog w-full max-w-lg rounded-[4px] border p-5"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -53,7 +53,7 @@ export function ScopedApprovalDialog({
           </div>
           <button
             type="button"
-            className="rounded-md p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+            className="rounded-[2px] p-1 text-neutral-400 hover:bg-black/[0.05] hover:text-[var(--beef-text)] dark:hover:bg-white/[0.08]"
             aria-label="关闭并拒绝"
             onClick={onReject}
           >
@@ -65,14 +65,14 @@ export function ScopedApprovalDialog({
           <button
             ref={rejectRef}
             type="button"
-            className="rounded-md px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            className="rounded-[2px] border border-[var(--beef-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--beef-text)] hover:bg-[var(--beef-raised)]"
             onClick={onReject}
           >
             拒绝
           </button>
           <button
             type="button"
-            className="rounded-[5px] bg-[var(--beef-active)] px-3 py-1.5 text-[12px] font-medium text-[#FFF8F0] hover:bg-[var(--beef-pressed)] active:scale-[0.97]"
+            className="rounded-[2px] bg-[var(--beef-active)] px-3 py-1.5 text-[12px] font-semibold text-[#111417] hover:bg-[var(--beef-pressed)] active:scale-[0.97]"
             onClick={onApprove}
           >
             {approveLabel}

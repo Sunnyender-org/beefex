@@ -714,7 +714,7 @@ fn atomic_write_bytes(
         .and_then(|name| name.to_str())
         .unwrap_or("file");
     let tmp = parent.join(format!(
-        ".kivio-tmp-{}-{file_name}",
+        ".beefex-tmp-{}-{file_name}",
         Uuid::new_v4().simple()
     ));
     {
@@ -1555,11 +1555,11 @@ mod tests {
     /// End-to-end simulation of an agent session using the Pi-style tool set.
     /// Exercises the coding-agent behaviors together: gitignore-aware grep/find,
     /// project-root confinement, in-project read-back, and bash large-output offload.
-    /// Run with: cargo test --bin kivio simulated_agent_session -- --nocapture
+    /// Run with: cargo test --bin beefex simulated_agent_session -- --nocapture
     #[tokio::test]
     async fn simulated_agent_session_exercises_pi_style_tools() {
         // ---- set up a realistic mini project ----
-        let proj = std::env::temp_dir().join(format!("kivio_sim_{}", uuid::Uuid::new_v4()));
+        let proj = std::env::temp_dir().join(format!("beefex_sim_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(proj.join("src")).expect("mkdir src");
         fs::create_dir_all(proj.join("node_modules/leftpad")).expect("mkdir node_modules");
         fs::write(proj.join(".gitignore"), "node_modules/\ndist/\n").expect("write gitignore");
@@ -1611,7 +1611,7 @@ mod tests {
 
         // 4) project boundary rejects an absolute path outside the opened root.
         let outside =
-            std::env::temp_dir().join(format!("kivio_sim_outside_{}.txt", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("beefex_sim_outside_{}.txt", uuid::Uuid::new_v4()));
         let outside_error = write_file(
             &ws,
             &json!({ "path": outside.to_string_lossy(), "content": "escaped the project root\n" }),
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn read_file_allows_temp_paths() {
-        let file = std::env::temp_dir().join(format!("kivio_read_{}.txt", uuid::Uuid::new_v4()));
+        let file = std::env::temp_dir().join(format!("beefex_read_{}.txt", uuid::Uuid::new_v4()));
         fs::write(&file, "alpha\nbeta\n").expect("write");
 
         let workspace = NativeToolWorkspace::global(&[]);
@@ -1685,7 +1685,7 @@ mod tests {
 
     #[test]
     fn read_file_returns_range_metadata_for_partial_reads() {
-        let file = std::env::temp_dir().join(format!("kivio_read_{}.txt", uuid::Uuid::new_v4()));
+        let file = std::env::temp_dir().join(format!("beefex_read_{}.txt", uuid::Uuid::new_v4()));
         fs::write(&file, "one\ntwo\nthree\nfour\n").expect("write");
 
         let workspace = NativeToolWorkspace::global(&[]);
@@ -1712,7 +1712,7 @@ mod tests {
 
     #[test]
     fn read_file_rejects_oversized_file_without_window_but_allows_offset_limit() {
-        let file = std::env::temp_dir().join(format!("kivio_big_{}.txt", uuid::Uuid::new_v4()));
+        let file = std::env::temp_dir().join(format!("beefex_big_{}.txt", uuid::Uuid::new_v4()));
         let line = "x".repeat(1024);
         let mut body = String::new();
         for idx in 0..3000 {
@@ -1751,7 +1751,7 @@ mod tests {
     #[test]
     fn edit_file_requires_unique_match_and_supports_multiple_edits() {
         let home = super::super::user_home_dir().expect("home");
-        let dir = home.join(format!(".kivio_test_{}", uuid::Uuid::new_v4()));
+        let dir = home.join(format!(".beefex_test_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("mkdir");
         let file = dir.join("sample.txt");
         fs::write(&file, "alpha\nbeta\nalpha\n").expect("write");
@@ -1789,7 +1789,7 @@ mod tests {
     #[test]
     fn edit_file_reports_noop_when_old_equals_new() {
         let home = super::super::user_home_dir().expect("home");
-        let dir = home.join(format!(".kivio_test_{}", uuid::Uuid::new_v4()));
+        let dir = home.join(format!(".beefex_test_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("mkdir");
         let file = dir.join("sample.txt");
         fs::write(&file, "hello world").expect("write");
@@ -1816,7 +1816,7 @@ mod tests {
 
     #[test]
     fn edit_file_matches_lf_old_string_against_crlf_file_and_keeps_crlf() {
-        let root = std::env::temp_dir().join(format!("kivio_edit_crlf_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_edit_crlf_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -1849,7 +1849,7 @@ mod tests {
 
     #[test]
     fn edit_file_treats_crlf_vs_lf_only_change_as_noop() {
-        let root = std::env::temp_dir().join(format!("kivio_edit_noop_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_edit_noop_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -1879,7 +1879,7 @@ mod tests {
 
     #[test]
     fn edit_file_lf_file_still_edits_and_keeps_lf() {
-        let root = std::env::temp_dir().join(format!("kivio_edit_lf_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_edit_lf_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -1907,7 +1907,7 @@ mod tests {
 
     #[test]
     fn edit_file_fuzzy_matches_smart_quotes() {
-        let root = std::env::temp_dir().join(format!("kivio_fuzzy_q_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_fuzzy_q_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -1937,7 +1937,7 @@ mod tests {
 
     #[test]
     fn edit_file_fuzzy_matches_dashes_and_nfkc() {
-        let root = std::env::temp_dir().join(format!("kivio_fuzzy_d_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_fuzzy_d_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -1966,7 +1966,7 @@ mod tests {
 
     #[test]
     fn edit_file_fuzzy_matches_whitespace_runs() {
-        let root = std::env::temp_dir().join(format!("kivio_fuzzy_ws_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_fuzzy_ws_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -1996,7 +1996,7 @@ mod tests {
 
     #[test]
     fn edit_file_fuzzy_rejects_ambiguous_match() {
-        let root = std::env::temp_dir().join(format!("kivio_fuzzy_amb_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_fuzzy_amb_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -2025,7 +2025,8 @@ mod tests {
 
     #[test]
     fn edit_file_exact_match_still_preferred_over_fuzzy() {
-        let root = std::env::temp_dir().join(format!("kivio_fuzzy_exact_{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("beefex_fuzzy_exact_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -2052,7 +2053,7 @@ mod tests {
 
     #[test]
     fn edit_file_fuzzy_not_found_errors() {
-        let root = std::env::temp_dir().join(format!("kivio_fuzzy_nf_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_fuzzy_nf_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -2094,7 +2095,7 @@ mod tests {
 
     #[test]
     fn search_files_context_and_long_line_cap() {
-        let root = std::env::temp_dir().join(format!("kivio_grep_ctx_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_grep_ctx_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -2141,7 +2142,7 @@ mod tests {
     }
     #[test]
     fn search_files_regex_output_modes_and_glob() {
-        let root = std::env::temp_dir().join(format!("kivio_search_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_search_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -2230,7 +2231,8 @@ mod tests {
 
     #[test]
     fn search_files_accepts_single_file_paths() {
-        let root = std::env::temp_dir().join(format!("kivio_search_file_{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("beefex_search_file_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj".to_string(),
@@ -2340,7 +2342,7 @@ mod tests {
     fn search_respects_gitignore_and_walks_root_named_like_ignored_dir() {
         // Regression: filter_entry must not prune the search root itself, and must
         // skip gitignored dirs (node_modules) without hiding same-named files.
-        let root = std::env::temp_dir().join(format!("kivio_gi_build_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_gi_build_{}", uuid::Uuid::new_v4()));
         // Root is literally named like an ignored dir ("build") — must still walk.
         let root = root.join("build");
         fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -2410,7 +2412,7 @@ mod tests {
 
     #[test]
     fn write_file_returns_structured_diff_metadata() {
-        let root = std::env::temp_dir().join(format!("kivio_write_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_write_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj_test".to_string(),
@@ -2440,7 +2442,7 @@ mod tests {
 
     #[test]
     fn project_workspace_rejects_escape_paths() {
-        let root = std::env::temp_dir().join(format!("kivio_project_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_project_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj_test".to_string(),
@@ -2451,7 +2453,7 @@ mod tests {
         let err = read_file(&workspace, &json!({ "path": "../secret.txt" })).unwrap_err();
         assert!(err.contains("project_path_outside_root"));
 
-        let outside = std::env::temp_dir().join(format!("kivio_outside_{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("beefex_outside_{}", uuid::Uuid::new_v4()));
         fs::write(&outside, "secret").expect("write outside");
         let err = read_file(&workspace, &json!({ "path": outside.to_string_lossy() }))
             .expect_err("absolute read outside project must be rejected");
@@ -2463,7 +2465,7 @@ mod tests {
 
     #[test]
     fn project_workspace_confines_writes_and_symlink_escapes() {
-        let root = std::env::temp_dir().join(format!("kivio_project_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_project_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let workspace = NativeToolWorkspace::project(
             "proj_test".to_string(),
@@ -2471,7 +2473,7 @@ mod tests {
             Some(root.to_string_lossy().into_owned()),
         );
 
-        let dir = std::env::temp_dir().join(format!("kivio_escape_{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("beefex_escape_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("mkdir outside target");
         let target = dir.join("note.html");
         let absolute_err = write_file(
@@ -2482,7 +2484,7 @@ mod tests {
         assert!(absolute_err.contains("project_path_outside_root"));
         assert!(!target.exists());
 
-        let escape_name = format!("kivio_escape_{}.txt", uuid::Uuid::new_v4());
+        let escape_name = format!("beefex_escape_{}.txt", uuid::Uuid::new_v4());
         let relative_err = write_file(
             &workspace,
             &json!({ "path": format!("../{escape_name}"), "content": "x" }),
@@ -2510,7 +2512,7 @@ mod tests {
 
     #[test]
     fn glob_files_rejects_path_like_patterns() {
-        let root = std::env::temp_dir().join(format!("kivio_glob_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_glob_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         fs::write(root.join("package.json"), "{}").expect("write package");
         let workspace = NativeToolWorkspace::project(
@@ -2542,7 +2544,7 @@ mod tests {
 
     #[test]
     fn write_file_overwrites_non_utf8_file_with_warning() {
-        let root = std::env::temp_dir().join(format!("kivio_binary_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_binary_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         fs::write(root.join("bin.dat"), [0xffu8, 0xfe, 0x01]).expect("write binary");
         let workspace = NativeToolWorkspace::project(
@@ -2578,7 +2580,7 @@ mod tests {
 
     #[test]
     fn edit_file_multiple_edits_report_exact_stats_with_multiple_hunks() {
-        let root = std::env::temp_dir().join(format!("kivio_hunks_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("beefex_hunks_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("mkdir");
         let mut lines = vec!["needle old".to_string()];
         for i in 0..20 {

@@ -1,4 +1,4 @@
-// 文档处理设置区（知识库页）：Kivio 内置本地解析 + 图片 OCR，
+// 文档处理设置区（知识库页）：Beefex 内置本地解析 + 图片 OCR，
 // 以及可选第三方解析服务（MinerU / LlamaParse，扫描版/复杂版面）。
 import { Download, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'

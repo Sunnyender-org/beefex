@@ -480,7 +480,7 @@ fn test_app_state() -> AppState {
     AppState::base(
         Settings::default(),
         std::env::temp_dir().join(format!(
-            "kivio-agent-loop-test-usage-{}",
+            "beefex-agent-loop-test-usage-{}",
             uuid::Uuid::new_v4()
         )),
         reqwest::Client::new(),
@@ -564,7 +564,7 @@ fn long_summary_sse_tagged(prefix: &str) -> String {
 /// Streaming planning step: one `read` tool call, then `[DONE]`.
 fn planning_tool_call_sse_events() -> Vec<String> {
     vec![
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_read","function":{"name":"read","arguments":"{\"path\":\"/tmp/kivio-test.txt\"}"}}]}}]}"#
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_read","function":{"name":"read","arguments":"{\"path\":\"/tmp/beefex-test.txt\"}"}}]}}]}"#
                 .to_string(),
             r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
             "[DONE]".to_string(),
@@ -600,7 +600,7 @@ fn planning_tool_call_json() -> String {
                     "type": "function",
                     "function": {
                         "name": "read",
-                        "arguments": "{\"path\":\"/tmp/kivio-test.txt\"}"
+                        "arguments": "{\"path\":\"/tmp/beefex-test.txt\"}"
                     }
                 }]
             }
@@ -636,7 +636,7 @@ fn pending_tool_call(id: &str, function_name: &str) -> PendingToolCall {
 
 fn test_tool_arguments(function_name: &str) -> Value {
     match function_name.to_ascii_lowercase().as_str() {
-        "read" => serde_json::json!({ "path": "/tmp/kivio-test.txt" }),
+        "read" => serde_json::json!({ "path": "/tmp/beefex-test.txt" }),
         "web_fetch" => serde_json::json!({ "url": "https://example.com" }),
         "run_python" => serde_json::json!({ "code": "print(1)" }),
         "ask_user" => serde_json::json!({

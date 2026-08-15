@@ -252,7 +252,7 @@ pub async fn run_codex_app_server_session(
         1,
         "initialize",
         json!({
-            "clientInfo": { "name": "kivio", "title": "kivio", "version": "0" },
+            "clientInfo": { "name": "beefex", "title": "beefex", "version": "0" },
         }),
     )
     .await?;
@@ -440,7 +440,7 @@ impl CodexAppServerSession {
             &mut stdin,
             1,
             "initialize",
-            json!({ "clientInfo": { "name": "kivio", "title": "kivio", "version": "0" } }),
+            json!({ "clientInfo": { "name": "beefex", "title": "beefex", "version": "0" } }),
         )
         .await?;
         read_until_response(&mut reader, &mut stdin, 1, Duration::from_secs(15)).await?;
@@ -704,7 +704,7 @@ pub async fn detect_codex_commands(
                 &mut stdin,
                 1,
                 "initialize",
-                json!({ "clientInfo": { "name": "kivio", "title": "kivio", "version": "0" } }),
+                json!({ "clientInfo": { "name": "beefex", "title": "beefex", "version": "0" } }),
             )
             .await
             .is_ok()

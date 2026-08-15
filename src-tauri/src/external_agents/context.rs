@@ -11,7 +11,7 @@ use crate::external_agents::session::claude_init::{
 };
 use crate::external_agents::types::RuntimeModelOption;
 
-pub const CONTEXT_SOURCE_BUILTIN: &str = "kivio_builtin";
+pub const CONTEXT_SOURCE_BUILTIN: &str = "beefex_builtin";
 pub const CONTEXT_SOURCE_EXTERNAL: &str = "external_cli";
 pub const TOKEN_COUNT_CLI: &str = "cli_reported";
 pub const TOKEN_COUNT_ESTIMATED: &str = "estimated";

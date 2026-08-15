@@ -23,7 +23,7 @@ pub(crate) async fn run_chat_probe(
     mode: Option<String>,
     cwd: Option<String>,
 ) -> Result<ChatMessage, String> {
-    const PROBE_PROJECT_ID: &str = "proj_kivio_probe";
+    const PROBE_PROJECT_ID: &str = "proj_beefex_probe";
     // cwd → 固定复用的「Chat Probe」项目：根设为 cwd，使文件工具（read/glob/grep）相对路径
     // 从此解析（非项目会话是 global workspace 无根，与真实 GUI 一致）。复用同一项目避免污染
     // 列表；不删除，方便在会话列表里点开观察每次 probe 的完整轨迹。

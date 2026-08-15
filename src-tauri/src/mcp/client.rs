@@ -33,7 +33,7 @@ pub(crate) fn initialize_params() -> Value {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {},
         "clientInfo": {
-            "name": "Kivio",
+            "name": "Beefex",
             "version": env!("CARGO_PKG_VERSION"),
         },
     })
@@ -54,7 +54,7 @@ pub(crate) fn negotiated_protocol_version(
     }
     if streamable_http && version == "2024-11-05" {
         return Err(
-            "MCP server selected protocolVersion 2024-11-05, which requires the legacy HTTP+SSE transport that Kivio does not support"
+            "MCP server selected protocolVersion 2024-11-05, which requires the legacy HTTP+SSE transport that Beefex does not support"
                 .to_string(),
         );
     }

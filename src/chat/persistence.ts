@@ -15,11 +15,17 @@ export type ChatWindowGeometry = {
   y?: number
 }
 
-const CHAT_LAST_ROUTE_KEY = 'kivio-chat-last-route'
-const CHAT_SIDEBAR_COLLAPSED_KEY = 'kivio-chat-sidebar-collapsed'
-const CHAT_WINDOW_GEOMETRY_KEY = 'kivio-chat-window-geometry'
+const CHAT_LAST_ROUTE_KEY = 'beefex-chat-last-route'
+const CHAT_SIDEBAR_COLLAPSED_KEY = 'beefex-chat-sidebar-collapsed'
+const CHAT_WINDOW_GEOMETRY_KEY = 'beefex-chat-window-geometry'
 /** @deprecated 旧版仅持久化尺寸；读取时自动迁移到 geometry key */
-const CHAT_WINDOW_SIZE_KEY = 'kivio-chat-window-size'
+const CHAT_WINDOW_SIZE_KEY = 'beefex-chat-window-size'
+const LEGACY_STORAGE_KEYS: Record<string, string> = {
+  [CHAT_LAST_ROUTE_KEY]: 'kivio-chat-last-route',
+  [CHAT_SIDEBAR_COLLAPSED_KEY]: 'kivio-chat-sidebar-collapsed',
+  [CHAT_WINDOW_GEOMETRY_KEY]: 'kivio-chat-window-geometry',
+  [CHAT_WINDOW_SIZE_KEY]: 'kivio-chat-window-size',
+}
 const WINDOWS_MINIMIZED_POSITION_SENTINEL = -10000
 const MIN_VISIBLE_GEOMETRY_EDGE = 80
 
@@ -41,7 +47,16 @@ export function isChatOnboardingPath(path: string): boolean {
 
 function getLocalStorageItem(key: string): string | null {
   try {
-    return window.localStorage?.getItem(key) ?? null
+    const current = window.localStorage?.getItem(key) ?? null
+    if (current !== null) return current
+    const legacyKey = LEGACY_STORAGE_KEYS[key]
+    if (!legacyKey) return null
+    const legacy = window.localStorage?.getItem(legacyKey) ?? null
+    if (legacy !== null) {
+      window.localStorage?.setItem(key, legacy)
+      window.localStorage?.removeItem(legacyKey)
+    }
+    return legacy
   } catch {
     return null
   }
@@ -58,6 +73,8 @@ function setLocalStorageItem(key: string, value: string) {
 function removeLocalStorageItem(key: string) {
   try {
     window.localStorage?.removeItem(key)
+    const legacyKey = LEGACY_STORAGE_KEYS[key]
+    if (legacyKey) window.localStorage?.removeItem(legacyKey)
   } catch {
     // Ignore storage errors; persistence is best-effort only.
   }

@@ -37,7 +37,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # tauri-build validates the target-specific external sidecar before Rust tests.
+      # tauri-build validates the target-specific Beefex OCR sidecar before Rust tests.
       - name: Build Swift sidecar
         run: npm run build:swift
 

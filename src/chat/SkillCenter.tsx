@@ -56,13 +56,8 @@ function isBuiltinSkill(skill: SkillMeta): boolean {
   return skill.source === 'builtin'
 }
 
-function isPluginSkill(skill: SkillMeta): boolean {
-  return skill.source === 'plugin'
-}
-
 function skillSourceLabel(skill: SkillMeta): string {
   if (skill.source === 'builtin') return '内置'
-  if (skill.source === 'plugin') return '插件'
   if (skill.source === 'external') return '工作区'
   return '个人'
 }
@@ -411,15 +406,10 @@ export function SkillCenter({ onClose, onSkillsChanged }: SkillCenterProps) {
     () => skills.filter((skill) => isBuiltinSkill(skill) && skillMatches(skill, normalizedQuery)),
     [skills, normalizedQuery],
   )
-  const pluginSkills = useMemo(
-    () => skills.filter((skill) => isPluginSkill(skill) && skillMatches(skill, normalizedQuery)),
-    [skills, normalizedQuery],
-  )
   const userSkills = useMemo(
     () =>
       skills.filter(
-        (skill) =>
-          !isBuiltinSkill(skill) && !isPluginSkill(skill) && skillMatches(skill, normalizedQuery),
+        (skill) => !isBuiltinSkill(skill) && skillMatches(skill, normalizedQuery),
       ),
     [skills, normalizedQuery],
   )
@@ -646,19 +636,6 @@ export function SkillCenter({ onClose, onSkillsChanged }: SkillCenterProps) {
                   collapsible
                   defaultCollapsed
                 />
-                {/* 插件技能：无插件且未搜索时整段隐藏，避免空框霸占版面 */}
-                {(pluginSkills.length > 0 || normalizedQuery) && (
-                  <SkillSection
-                    title="插件技能"
-                    note="由扩展 → 插件 统一启用/关闭"
-                    emptyText="没有匹配的插件技能。"
-                    skills={pluginSkills}
-                    disabledSkillIds={disabledSkillIds}
-                    onToggleEnabled={handleToggleSkillEnabled}
-                    onPreview={handlePreviewSkill}
-                    manageLocked
-                  />
-                )}
               </>
             )}
           </div>

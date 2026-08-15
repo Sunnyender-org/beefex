@@ -12,18 +12,16 @@ import type {
   ConversationContextState,
   ConversationListItem,
   AgentPlanMode,
-  DetectedExternalAgent,
   PendingAttachment,
   PiProjectTrustPreview,
 } from './types'
 import type { ThinkingLevel, ModelRef } from './types'
 import type { PiRpcCommand } from './piCapabilities'
 
-export type { DetectedExternalAgent }
 
-const mockStorageKey = 'kivio-chat-dev-conversations'
-const mockProjectsStorageKey = 'kivio-chat-dev-projects'
-const mockAssistantsStorageKey = 'kivio-chat-dev-assistants'
+const mockStorageKey = 'beefex-chat-dev-conversations'
+const mockProjectsStorageKey = 'beefex-chat-dev-projects'
+const mockAssistantsStorageKey = 'beefex-chat-dev-assistants'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
@@ -1419,27 +1417,6 @@ export const chatApi = {
   async cancelStream(conversationId: string): Promise<void> {
     if (!isTauriRuntime()) return
     await invoke<void>('chat_cancel_stream', { conversationId })
-  },
-
-  async detectExternalAgents(
-    forceRefresh = false,
-    conversationId?: string | null,
-  ): Promise<DetectedExternalAgent[]> {
-    if (!isTauriRuntime()) {
-      return [
-        {
-          id: 'claude',
-          name: 'Claude Code',
-          available: false,
-          models: [{ id: 'default', label: 'Default' }],
-        },
-      ]
-    }
-    const result = await invoke<{ success: boolean; agents: DetectedExternalAgent[] }>(
-      'chat_detect_external_agents',
-      { forceRefresh, conversationId },
-    )
-    return result.agents ?? []
   },
 
   async listExternalCliSlashCommands(

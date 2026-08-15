@@ -38,7 +38,7 @@ pub fn filter_tools_for_agent(
         let allowed = allow
             .iter()
             .any(|name| tool_matches_recommended_name(tool, name));
-        // Keep Kivio housekeeping built-ins (todo, etc.) that the agent did not
+        // Keep Beefex housekeeping built-ins (todo, etc.) that the agent did not
         // explicitly exclude — they are appended separately and are harmless.
         if allowed {
             true
@@ -68,7 +68,7 @@ mod tests {
             description: String::new(),
             source: "native".to_string(),
             server_id: None,
-            server_name: Some("Kivio".to_string()),
+            server_name: Some("Beefex".to_string()),
             input_schema: serde_json::json!({}),
             sensitive: false,
             annotations: None,

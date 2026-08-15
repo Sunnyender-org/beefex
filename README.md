@@ -1,6 +1,8 @@
 # Beefex
 
-Beefex is an open-source, BeefAPI-first desktop coding agent built with React, TypeScript, Rust, Tauri, and the official Pi coding-agent runtime.
+Beefex is BeefAPI's open-source desktop coding agent. React + Tauri owns the
+product shell while the pinned official Pi coding agent owns cognition, tools,
+skills, extensions, sessions, compaction, and recovery.
 
 The core workflow is:
 
@@ -8,11 +10,13 @@ The core workflow is:
 
 ## Status
 
-Beefex is under active development toward a macOS internal alpha. The source is public, but there is no supported public binary release yet.
+Beefex is under active development as a macOS Alpha. An unsigned Apple Silicon
+test DMG is available from GitHub Releases, but it is not a signed, notarized, or
+generally supported production release.
 
 - macOS arm64 is the current development and packaging target.
 - Windows packaging and runtime support are not ready.
-- The repository does not publish signed or notarized artifacts.
+- Published Alpha artifacts are unsigned and not notarized.
 - BeefAPI credentials remain backend-owned and are not written to renderer state or Pi configuration files.
 
 ## Architecture
@@ -22,8 +26,13 @@ Beefex is under active development toward a macOS internal alpha. The source is 
 - **Account and model authority:** BeefAPI
 - **Persistence:** Beefex stores Task metadata and Pi session references; Pi owns the agent transcript and runtime session
 - **Approvals:** project trust is separate from scoped file and shell approval
+- **Design source:** BFLabs screen language, applied screen-first without a generic component platform
 
-Some internal Rust crate, binary, storage, and compatibility identifiers still retain the Kivio name. They are inherited implementation identifiers, not a selectable Kivio product runtime. See [`NOTICE`](NOTICE) for attribution.
+The selectable legacy runtime, generic runtime adapter, standalone coding CLI,
+and inherited product plugin surface have been retired. The app, Rust crate,
+main executable, and OCR helper use Beefex identity. Explicit compatibility
+aliases remain only where required to read current Beefex data, and upstream
+legal attribution remains in [`NOTICE`](NOTICE).
 
 ## Development
 
@@ -77,4 +86,7 @@ See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for the complete source and attr
 
 Beefex 是一个开源的 BeefAPI 登录即用桌面 coding agent。当前产品执行链使用官方 Pi coding-agent runtime；React + Tauri 负责桌面产品壳、Task、审批、diff、命令回执和恢复界面。
 
-目前只把 macOS arm64 作为开发与验收目标。源码公开不代表已经提供可用的签名安装包，Windows 版本也尚未完成。
+目前只把 macOS arm64 作为开发与验收目标。GitHub Releases 提供未签名、未公证的
+Apple Silicon 测试包，但它不是正式生产发布，Windows 版本也尚未完成。产品身份、
+主执行文件和 OCR helper 已收敛为 Beefex；Pi 通过原生 RPC、Skills、Extensions 和
+Packages 提供 coding-agent 能力。

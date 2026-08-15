@@ -1496,7 +1496,7 @@ fn auxiliary_vision_result_becomes_text_for_main_chat_model() {
     let result = AuxiliaryVisionResult {
         provider_name: "Vision Provider".to_string(),
         model: "vision-model".to_string(),
-        content: "图片里是一张 Kivio 设置页截图。".to_string(),
+        content: "图片里是一张 Beefex 设置页截图。".to_string(),
     };
     let augmented = user_content_with_auxiliary_vision_result(Some("这是什么？"), &result, "zh");
 
@@ -1506,7 +1506,7 @@ fn auxiliary_vision_result_becomes_text_for_main_chat_model() {
 
     assert!(content.is_string());
     assert!(content.as_str().unwrap().contains("[混音器视觉副任务结果]"));
-    assert!(content.as_str().unwrap().contains("Kivio 设置页截图"));
+    assert!(content.as_str().unwrap().contains("Beefex 设置页截图"));
     assert!(!serde_json::to_string(&messages)
         .expect("messages serialize")
         .contains("image_url"));

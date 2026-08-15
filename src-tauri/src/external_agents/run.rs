@@ -30,7 +30,6 @@ use crate::external_agents::session::pi_rpc::{
     PiRpcClient,
 };
 use crate::external_agents::session::{persist_delivered_session, resolve_agent_resume_context};
-use crate::external_agents::skill_stage::{skill_cwd_alias_segment, stage_active_skill};
 use crate::external_agents::slash::{self};
 use crate::external_agents::spawn::{
     drain_stderr, read_stdout_lines, resolve_binary, spawn_agent, tail_chars, write_prompt_stdin,
@@ -39,8 +38,7 @@ use crate::external_agents::stream::create_stream_handler;
 use crate::external_agents::types::{
     ExternalAgentSession, RuntimeBuildOptions, RuntimeContext, StreamFormat, UnifiedAgentEvent,
 };
-use crate::external_agents::workspace::{extra_allowed_dirs_for_agent, resolve_effective_cwd};
-use crate::skills::read_skill_detail;
+use crate::external_agents::workspace::resolve_effective_cwd;
 use crate::state::{AppState, ChatRunStatus};
 
 #[derive(Debug, Clone)]
@@ -53,10 +51,6 @@ pub struct ExternalRunOutcome {
     pub run_id: String,
     pub status: ChatRunStatus,
     pub receipt: crate::chat::ChatCompletionReceipt,
-}
-
-fn host_skill_bridge_enabled(stream_format: StreamFormat) -> bool {
-    stream_format != StreamFormat::PiRpc
 }
 
 fn managed_pi_runtime_env(
@@ -131,7 +125,7 @@ pub async fn run_external_cli_reply(
     conversation: &mut Conversation,
     title_from_first_user: Option<&str>,
     latest_user_message: &str,
-    active_skill_id: Option<&str>,
+    _active_skill_id: Option<&str>,
     entry: AgentRunEntry,
     registered_run: Option<ExternalRunIdentity>,
 ) -> Result<ExternalRunOutcome, String> {
@@ -187,18 +181,6 @@ pub async fn run_external_cli_reply(
         .or_else(|| conversation.agent_runtime.external_model.clone());
 
     let is_slash = is_cli_slash_input(latest_user_message);
-    // Pi owns tools, skills, extensions, and sessions. The host-side bridge is a Kivio
-    // compatibility path and must never leak into a Pi-native run.
-    let host_skill_bridge_enabled = host_skill_bridge_enabled(def.stream_format);
-
-    let skill_detail = if is_slash || !host_skill_bridge_enabled {
-        None
-    } else if let Some(skill_id) = active_skill_id.filter(|s| !s.is_empty()) {
-        read_skill_detail(app, &settings.chat_tools.skill_scan_paths, skill_id).ok()
-    } else {
-        None
-    };
-
     let memory_body = if is_slash || !settings.chat_memory.enabled {
         String::new()
     } else {
@@ -217,10 +199,7 @@ pub async fn run_external_cli_reply(
             daemon_instructions.push('\n');
         }
     }
-    daemon_instructions.push_str(&cwd_hint(
-        cwd.to_string_lossy().as_ref(),
-        host_skill_bridge_enabled,
-    ));
+    daemon_instructions.push_str(&cwd_hint(cwd.to_string_lossy().as_ref()));
 
     let resume_ctx = resolve_agent_resume_context(
         app,
@@ -232,38 +211,21 @@ pub async fn run_external_cli_reply(
         is_slash,
     );
 
-    let skill_dir = skill_detail.as_ref().and_then(|d| d.meta.path.clone());
-    let skill_body = skill_detail.as_ref().map(|d| d.body.clone());
-    let skill_folder = skill_dir.as_deref().map(skill_cwd_alias_segment);
-
-    if !is_slash && host_skill_bridge_enabled {
-        if let (Some(dir), Some(folder)) = (skill_dir.as_deref(), skill_folder.as_deref()) {
-            let _ = stage_active_skill(&cwd, folder, std::path::Path::new(dir));
-        }
-    }
-
     let composed = if is_slash {
         compose_external_prompt_passthrough(latest_user_message)
     } else {
         compose_external_prompt(
             conversation,
             &daemon_instructions,
-            skill_body.as_deref(),
-            skill_dir.as_deref(),
-            skill_folder.as_deref(),
+            None,
             resume_ctx.skip_instructions,
             resume_ctx.is_resuming,
             latest_user_message,
         )
     };
 
-    let extra_dirs = if host_skill_bridge_enabled {
-        extra_allowed_dirs_for_agent(def, &settings.chat_tools.skill_scan_paths)
-    } else {
-        Vec::new()
-    };
     let runtime_ctx = RuntimeContext {
-        extra_allowed_dirs: extra_dirs,
+        extra_allowed_dirs: Vec::new(),
         resume_session_id: resume_ctx.resume_session_id.clone(),
         new_session_id: resume_ctx.new_session_id.clone(),
         include_partial_messages: true,
@@ -686,7 +648,7 @@ pub async fn run_external_cli_reply(
         tool_calls,
         vec![],
         segments,
-        active_skill_id.filter(|_| host_skill_bridge_enabled),
+        None,
         title_from_first_user,
         Some(match entry {
             AgentRunEntry::Send => "send",
@@ -1661,12 +1623,6 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pi_rpc_disables_the_kivio_host_skill_bridge() {
-        assert!(!host_skill_bridge_enabled(StreamFormat::PiRpc));
-        assert!(host_skill_bridge_enabled(StreamFormat::ClaudeStreamJson));
-    }
 
     #[test]
     fn managed_pi_runtime_isolates_global_home_skills() {

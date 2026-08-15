@@ -3,8 +3,8 @@ import type { HistoryItem } from './types'
 export const HISTORY_MAX = 20
 export const HISTORY_THUMB_SIZE = 96
 
-const HISTORY_STORAGE_KEY = 'kivio:lens-history:v1'
-const HISTORY_STORAGE_KEY_LEGACY = 'keylingo:lens-history:v1'
+const HISTORY_STORAGE_KEY = 'beefex:lens-history:v1'
+const HISTORY_STORAGE_KEYS_LEGACY = ['kivio:lens-history:v1', 'keylingo:lens-history:v1']
 
 /** Canvas 缩放截图为小缩略图，避免历史记录把整张原图（几 MB）写进 localStorage */
 export async function makeThumbnail(dataUrl: string, maxSize: number): Promise<string> {
@@ -30,16 +30,18 @@ export async function makeThumbnail(dataUrl: string, maxSize: number): Promise<s
 }
 
 /** 从 localStorage 读历史。失败 / 损坏数据 → 空数组。
-    一次性迁移：keylingo:lens-history:v1 → kivio:lens-history:v1 */
+    一次性迁移旧版 Lens key → beefex:lens-history:v1 */
 export function loadHistoryFromStorage(): HistoryItem[] {
   try {
     let raw = localStorage.getItem(HISTORY_STORAGE_KEY)
     if (!raw) {
-      const legacy = localStorage.getItem(HISTORY_STORAGE_KEY_LEGACY)
-      if (legacy) {
-        localStorage.setItem(HISTORY_STORAGE_KEY, legacy)
-        localStorage.removeItem(HISTORY_STORAGE_KEY_LEGACY)
-        raw = legacy
+      const legacyEntry = HISTORY_STORAGE_KEYS_LEGACY
+        .map((key) => [key, localStorage.getItem(key)] as const)
+        .find(([, value]) => value)
+      if (legacyEntry?.[1]) {
+        localStorage.setItem(HISTORY_STORAGE_KEY, legacyEntry[1])
+        for (const key of HISTORY_STORAGE_KEYS_LEGACY) localStorage.removeItem(key)
+        raw = legacyEntry[1]
       } else {
         return []
       }

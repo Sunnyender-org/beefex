@@ -174,7 +174,7 @@ fn run_inpainting(
         image_nchw[pixel_count * 2 + index] = pixel[2];
     }
     let binary_mask = mask.binary_data();
-    // The public Kivio mask uses 255=hole. MI-GAN's exported pipeline uses the
+    // The public Beefex mask uses 255=hole. MI-GAN's exported pipeline uses the
     // opposite convention (255=known, 0=hole) for bbox detection and blending.
     let model_mask: Vec<u8> = binary_mask
         .iter()
@@ -323,17 +323,17 @@ mod tests {
         assert_eq!(error.code, InpaintingErrorCode::OutputInvalid);
     }
 
-    /// Manual model integration check. Set KIVIO_MIGAN_TEST_DIR to a directory
+    /// Manual model integration check. Set BEEFEX_MIGAN_TEST_DIR to a directory
     /// containing verified runtime files and inpainting/migan_pipeline_v2.onnx.
     #[tokio::test]
     #[ignore]
     async fn inpainting_real_e2e() {
-        let dir = std::env::var_os("KIVIO_MIGAN_TEST_DIR")
+        let dir = std::env::var_os("BEEFEX_MIGAN_TEST_DIR")
             .map(std::path::PathBuf::from)
-            .expect("set KIVIO_MIGAN_TEST_DIR");
-        let input = std::env::var_os("KIVIO_MIGAN_TEST_IMAGE")
+            .expect("set BEEFEX_MIGAN_TEST_DIR");
+        let input = std::env::var_os("BEEFEX_MIGAN_TEST_IMAGE")
             .map(std::path::PathBuf::from)
-            .expect("set KIVIO_MIGAN_TEST_IMAGE");
+            .expect("set BEEFEX_MIGAN_TEST_IMAGE");
         let image = image::open(&input).expect("open input image").to_rgb8();
         let (width, height) = image.dimensions();
         let mut data = vec![0u8; width as usize * height as usize];

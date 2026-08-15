@@ -809,7 +809,7 @@ pub(crate) fn toggle_main_window(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     {
         ensure_overlay_panel(&window);
-        // ensure_main_window 的冷创建若短暂激活了 Kivio，在显示非激活 Panel 前立刻纠正；
+        // ensure_main_window 的冷创建若短暂激活了 Beefex，在显示非激活 Panel 前立刻纠正；
         // 不触碰 Chat 窗口本身。
         let st = app.state::<AppState>();
         reassert_previous_frontmost_app(app, &st.prev_frontmost_pid_main);

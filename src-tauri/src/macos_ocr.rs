@@ -78,7 +78,7 @@ impl MacOcrClient {
         })
     }
 
-    /// Headless (no-AppHandle) client for the `kivio-code` CLI, which has no
+    /// Headless (no-AppHandle) client for the `beefex-code` CLI, which has no
     /// Tauri runtime. OCR is never invoked from the terminal agent, so this
     /// mirrors `new` but carries `app: None` (the sidecar can never be spawned).
     pub fn headless() -> Arc<Self> {
@@ -175,7 +175,7 @@ impl MacOcrClient {
             return Err("macOS OCR 不可用".into());
         };
 
-        let sidecar = app.shell().sidecar("kivio-ocr-helper").map_err(|err| {
+        let sidecar = app.shell().sidecar("beefex-ocr-helper").map_err(|err| {
             self.permanently_unavailable.store(true, Ordering::SeqCst);
             eprintln!("[macos-ocr] sidecar 不存在或未配置: {err}");
             "macOS OCR 不可用".to_string()

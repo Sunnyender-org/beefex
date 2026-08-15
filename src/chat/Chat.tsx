@@ -3425,6 +3425,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                 />
               )}
               <div className="flex min-w-0 items-center gap-1">
+                <div className="beef-workspace-readback" title={selectedProject?.name || (uiLang === 'en' ? 'No project selected' : '未选择项目')}>
+                  <span>{uiLang === 'en' ? 'WORKSPACE' : '工作区'}</span>
+                  <strong>{selectedProject?.name || (uiLang === 'en' ? 'No project' : '未选择项目')}</strong>
+                </div>
                 <ManagedModelSelector
                   models={managedAllowedModels}
                   value={activeModel}
@@ -3460,7 +3464,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                         {uiLang === 'en' ? 'NEW CODING TASK' : '新建 CODING TASK'}
                       </span>
                     <h2
-                      className="chat-empty-hero-title mt-2 text-center text-[1.25rem] font-semibold leading-snug tracking-[-0.012em] text-neutral-900 dark:text-[#FFEEDA] sm:text-[1.4rem]"
+                      className="chat-empty-hero-title mt-3 text-center text-[1.25rem] font-semibold leading-snug tracking-[-0.012em] text-neutral-900 dark:text-[var(--beef-text)] sm:text-[1.4rem]"
                     >
                       {currentAssistantSnapshot?.name
                         || selectedProject?.name

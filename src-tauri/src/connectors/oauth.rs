@@ -587,7 +587,7 @@ async fn register_client(
     scopes: &[String],
 ) -> Result<String, String> {
     let mut body = serde_json::json!({
-        "client_name": "Kivio",
+        "client_name": "Beefex",
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -677,7 +677,7 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
             } else if params.get("code").is_some() {
                 (
                     "200 OK",
-                    "<html><body><p>授权完成，可关闭此窗口返回 Kivio。</p></body></html>",
+                    "<html><body><p>授权完成，可关闭此窗口返回 Beefex。</p></body></html>",
                 )
             } else {
                 (

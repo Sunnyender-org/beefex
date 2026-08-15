@@ -2,16 +2,15 @@
 
 pub mod agents;
 pub mod api;
+pub mod app_paths;
 pub(crate) mod beefapi;
 pub mod capture_geometry;
 pub mod chat;
-pub mod cli_install;
 pub mod commands;
 pub mod connectors;
 pub mod diagnostics;
 pub mod external_agents;
 pub mod inpainting;
-pub mod kivio_code;
 pub mod lens;
 pub mod lens_commands;
 #[cfg(target_os = "macos")]
@@ -20,7 +19,6 @@ pub mod mcp;
 pub mod native_tools;
 pub mod offline_models;
 pub mod path_env;
-pub mod plugins;
 pub mod proc;
 pub mod prompts;
 pub mod rapidocr;
@@ -312,7 +310,7 @@ pub fn run() {
             }
             let usage_dir = usage::usage_dir(&app.handle()).unwrap_or_else(|err| {
                 eprintln!("Failed to initialize usage ledger dir: {err}");
-                std::env::temp_dir().join("kivio-usage")
+                std::env::temp_dir().join("beefex-usage")
             });
 
             let offline_models =
@@ -600,7 +598,6 @@ pub fn run() {
             chat::commands::mutations::chat_set_group_selection,
             chat::commands::mutations::chat_regenerate_message,
             chat::commands::mutations::chat_fork_conversation,
-            external_agents::commands::chat_detect_external_agents,
             external_agents::commands::chat_list_external_cli_slash_commands,
             external_agents::commands::chat_pi_project_trust_preview,
             external_agents::commands::chat_pi_set_project_trust,
@@ -620,10 +617,6 @@ pub fn run() {
             connectors::himalaya::himalaya_status_cmd,
             connectors::himalaya::himalaya_install_cmd,
             connectors::himalaya::test_himalaya_email_cmd,
-            plugins::plugins_list,
-            plugins::plugins_install_brief,
-            plugins::plugins_set_enabled,
-            plugins::plugins_uninstall,
             skills::chat_skills_list,
             skills::chat_skills_read,
             skills::chat_skills_import,
@@ -658,8 +651,6 @@ pub fn run() {
                     if killed > 0 {
                         eprintln!("Killed {killed} background command process group(s) on exit.");
                     }
-                    // OfficeCLI live preview (`officecli watch`) 等插件附属进程
-                    crate::plugins::stop_all_previews();
                 }
             }
             #[cfg(target_os = "macos")]

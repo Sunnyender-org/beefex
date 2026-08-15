@@ -9,7 +9,8 @@ import { useCallback, useSyncExternalStore } from 'react'
 
 export type MultiAnswerViewMode = 'tabs' | 'columns'
 
-const MULTI_ANSWER_VIEW_STORAGE_KEY = 'kivio.chat.multiAnswerView'
+const MULTI_ANSWER_VIEW_STORAGE_KEY = 'beefex.chat.multiAnswerView'
+const LEGACY_MULTI_ANSWER_VIEW_STORAGE_KEY = 'kivio.chat.multiAnswerView'
 
 const DEFAULT_MODE: MultiAnswerViewMode = 'tabs'
 
@@ -20,7 +21,14 @@ function isValidMode(value: string | null): value is MultiAnswerViewMode {
 function readFromStorage(): MultiAnswerViewMode {
   if (typeof window === 'undefined') return DEFAULT_MODE
   try {
-    const raw = window.localStorage.getItem(MULTI_ANSWER_VIEW_STORAGE_KEY)
+    let raw = window.localStorage.getItem(MULTI_ANSWER_VIEW_STORAGE_KEY)
+    if (raw === null) {
+      raw = window.localStorage.getItem(LEGACY_MULTI_ANSWER_VIEW_STORAGE_KEY)
+      if (raw !== null) {
+        window.localStorage.setItem(MULTI_ANSWER_VIEW_STORAGE_KEY, raw)
+        window.localStorage.removeItem(LEGACY_MULTI_ANSWER_VIEW_STORAGE_KEY)
+      }
+    }
     return isValidMode(raw) ? raw : DEFAULT_MODE
   } catch {
     // 隐私模式 / 存储被禁用 → 退回默认。
@@ -53,7 +61,7 @@ function subscribe(cb: () => void): () => void {
   subscribers.add(cb)
   // 跨窗口/标签页同步：另一窗口改了偏好 → storage 事件 → 重读并通知本窗口订阅者。
   const onStorage = (e: StorageEvent) => {
-    if (e.key !== MULTI_ANSWER_VIEW_STORAGE_KEY) return
+    if (e.key !== MULTI_ANSWER_VIEW_STORAGE_KEY && e.key !== LEGACY_MULTI_ANSWER_VIEW_STORAGE_KEY) return
     const next = readFromStorage()
     if (next !== current) {
       current = next

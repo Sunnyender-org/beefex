@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-  name: "kivio-ocr-helper",
+  name: "beefex-ocr-helper",
   platforms: [.macOS("14.0")],
   targets: [
     .executableTarget(
-      name: "kivio-ocr-helper",
+      name: "beefex-ocr-helper",
       path: "Sources"
     )
   ]

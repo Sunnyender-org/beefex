@@ -2,52 +2,11 @@ use std::path::Path;
 use tauri::{AppHandle, Manager};
 
 use crate::chat::storage::load_conversation;
-use crate::external_agents::detection::{detect_all_agents, EXTERNAL_AGENT_MODELS_CACHE_TTL};
 use crate::external_agents::project_trust::{preview_project_trust, set_project_trust};
 use crate::external_agents::session::live::SessionCommand;
 use crate::external_agents::session::pi_rpc::PiRpcCommand;
-use crate::external_agents::slash::{cache_key, list_external_cli_slash_commands};
-use crate::external_agents::workspace::resolve_detection_cwd;
+use crate::external_agents::slash::list_external_cli_slash_commands;
 use crate::state::AppState;
-
-#[tauri::command]
-pub async fn chat_detect_external_agents(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-    force_refresh: Option<bool>,
-    conversation_id: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let force = force_refresh.unwrap_or(false);
-    let cwd = resolve_detection_cwd(&app, conversation_id.as_deref())?;
-    let cwd_key = cwd.to_string_lossy().into_owned();
-    if !force {
-        if let Some(agents) =
-            state.get_cached_detected_agents(&cwd_key, EXTERNAL_AGENT_MODELS_CACHE_TTL)
-        {
-            return Ok(serde_json::json!({
-                "success": true,
-                "agents": agents,
-                "cached": true,
-            }));
-        }
-    }
-
-    let agents = detect_all_agents(&cwd).await;
-    for agent in &agents {
-        if !agent.models.is_empty() {
-            state.set_cached_external_agent_models(
-                cache_key(&agent.id, &cwd_key),
-                agent.models.clone(),
-            );
-        }
-    }
-    state.set_cached_detected_agents(cwd_key, agents.clone());
-    Ok(serde_json::json!({
-        "success": true,
-        "agents": agents,
-        "cached": false,
-    }))
-}
 
 #[tauri::command]
 pub async fn chat_list_external_cli_slash_commands(

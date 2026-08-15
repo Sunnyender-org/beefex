@@ -23,7 +23,7 @@ const labels: Record<ChatTaskStatus, { zh: string; en: string }> = {
 export function TaskStatusBadge({ status, lang }: { status: ChatTaskStatus; lang: 'zh' | 'en' }) {
   return (
     <div
-      className={`beef-task-status flex h-6 shrink-0 items-center gap-1.5 rounded-[5px] border px-2 text-[11px] font-medium ${styles[status]}`}
+      className={`beef-task-status flex h-6 shrink-0 items-center gap-1.5 rounded-[2px] border px-2 text-[10px] font-bold tracking-[0.04em] ${styles[status]}`}
       data-task-status={status}
       title={labels[status][lang]}
     >

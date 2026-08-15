@@ -540,14 +540,14 @@ body {
   --theme-surface: var(--beef-workbench);
   --theme-surface-soft: var(--beef-raised);
   --theme-surface-muted: var(--beef-raised);
-  --theme-surface-hover: #ebe7e2;
-  --theme-surface-active: #e3ddd6;
-  --theme-surface-titlebar: #ede9e4;
+  --theme-surface-hover: #e9e5dc;
+  --theme-surface-active: #dfd9ce;
+  --theme-surface-titlebar: #f3f0e9;
   --theme-surface-border: var(--beef-border);
   --theme-surface-border-strong: rgba(33, 29, 26, 0.2);
   --accent: var(--beef-active);
   --accent-hover: var(--beef-pressed);
-  --accent-soft: rgba(226, 106, 62, 0.12);
+  --accent-soft: rgba(255, 106, 51, 0.12);
   --text: var(--beef-text);
   --text-faint: var(--beef-text-secondary);
   container-type: size;
@@ -557,7 +557,7 @@ body {
   width: 100%;
   display: flex;
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: var(--bflabs-radius-surface);
   border: 1px solid rgba(0, 0, 0, 0.06);
   background: var(--beef-workbench);
   box-shadow:
@@ -579,14 +579,14 @@ body {
   --theme-surface: var(--beef-workbench);
   --theme-surface-soft: var(--beef-raised);
   --theme-surface-muted: var(--beef-raised);
-  --theme-surface-hover: rgba(255, 238, 218, 0.07);
-  --theme-surface-active: rgba(255, 238, 218, 0.1);
-  --theme-surface-titlebar: rgba(255, 238, 218, 0.06);
+  --theme-surface-hover: rgba(250, 248, 245, 0.07);
+  --theme-surface-active: rgba(250, 248, 245, 0.1);
+  --theme-surface-titlebar: rgba(250, 248, 245, 0.05);
   --theme-surface-border: var(--beef-border);
   --theme-surface-border-strong: rgba(255, 238, 218, 0.2);
   --accent: var(--beef-active);
   --accent-hover: var(--beef-pressed);
-  --accent-soft: rgba(232, 136, 98, 0.15);
+  --accent-soft: rgba(255, 106, 51, 0.15);
   --text: var(--beef-text);
   --text-faint: var(--beef-text-secondary);
   border-color: var(--beef-border);
@@ -658,6 +658,50 @@ body {
     opacity var(--kv-dur-normal) var(--kv-ease-out);
 }
 
+.beef-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 15px 15px;
+  padding: 2px 0 13px;
+  border-bottom: 1px solid var(--beef-border);
+}
+
+.beef-sidebar-brand-mark {
+  display: inline-flex;
+  width: 27px;
+  height: 27px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--beef-active);
+  border-radius: 0;
+  color: var(--beef-active);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.beef-sidebar-brand-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.beef-sidebar-brand-copy strong {
+  color: var(--beef-text);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.beef-sidebar-brand-copy small {
+  color: var(--beef-active);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
 .chat-sidebar-shell.is-collapsed {
   margin-left: -240px;
   opacity: 0;
@@ -673,6 +717,34 @@ body {
   background: var(--beef-workbench);
 }
 
+.beef-workspace-readback {
+  display: flex;
+  min-width: 108px;
+  max-width: 190px;
+  flex-direction: column;
+  gap: 1px;
+  margin-right: 8px;
+  padding-right: 12px;
+  border-right: 1px solid var(--beef-border);
+  line-height: 1.1;
+}
+
+.beef-workspace-readback > span {
+  color: var(--beef-text-secondary);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+}
+
+.beef-workspace-readback > strong {
+  overflow: hidden;
+  color: var(--beef-text);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-sidebar-titlebar {
   border-bottom: 1px solid var(--beef-border);
   background: var(--beef-surface);
@@ -686,7 +758,7 @@ body {
   gap: 6px;
   padding: 0 8px;
   border: 1px solid var(--beef-border);
-  border-radius: 5px;
+  border-radius: var(--bflabs-radius-control);
   background: var(--beef-surface);
   color: var(--beef-text-secondary);
   font-size: 11px;
@@ -713,9 +785,16 @@ body {
 }
 
 .beef-approval-dialog {
-  border-color: var(--beef-border);
-  background: var(--beef-surface);
+  border-color: var(--beef-active);
+  border-left-width: 3px;
+  background: var(--beef-raised);
   color: var(--beef-text);
+  box-shadow: 0 24px 70px rgba(17, 20, 23, 0.22);
+}
+
+.beef-approval-backdrop {
+  background: rgba(17, 20, 23, 0.38);
+  backdrop-filter: blur(2px);
 }
 
 .beef-task-status--idle,
@@ -760,13 +839,14 @@ body {
 }
 
 .beef-completion-receipt {
-  border-color: var(--beef-border);
-  background: var(--beef-surface);
+  border-color: color-mix(in srgb, var(--beef-verified) 48%, var(--beef-border));
+  border-left-width: 3px;
+  background: color-mix(in srgb, var(--beef-verified) 7%, var(--beef-raised));
   color: var(--beef-text);
 }
 
 .chat-sidebar-shell button {
-  border-radius: 5px;
+  border-radius: var(--bflabs-radius-control);
 }
 
 .beef-account-popover {
@@ -777,7 +857,7 @@ body {
   z-index: 50;
   padding: 10px;
   border: 1px solid var(--beef-border);
-  border-radius: 6px;
+  border-radius: var(--bflabs-radius-surface);
   background: var(--beef-surface);
   color: var(--beef-text);
   box-shadow: 0 12px 28px rgba(33, 29, 26, 0.14);
@@ -839,7 +919,7 @@ body {
   margin-top: 8px;
   padding: 0 8px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--bflabs-radius-control);
   background: var(--beef-raised);
   color: var(--beef-text);
   font-size: 11px;
@@ -863,7 +943,7 @@ body {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  border-radius: 5px;
+  border-radius: var(--bflabs-radius-control);
   background: var(--beef-active);
   color: #fff8f0;
   font-size: 11px;
@@ -1260,7 +1340,9 @@ body {
   position: relative;
   overflow: hidden;
   isolation: isolate;
-  background-color: var(--theme-surface);
+  background-color: var(--beef-workbench);
+  background-image:
+    linear-gradient(90deg, transparent 0, transparent calc(50% - 1px), color-mix(in srgb, var(--beef-border) 48%, transparent) 50%, transparent calc(50% + 1px));
 }
 
 .dark .chat-empty-hero {
@@ -1278,8 +1360,41 @@ body {
 
 .chat-empty-hero-title {
   font-family: inherit;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  color: var(--beef-text);
+  font-size: clamp(1.55rem, 3.4vw, 2.7rem) !important;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+
+.beef-user-prompt {
+  border: 1px solid var(--beef-border);
+  border-right: 3px solid var(--beef-active);
+  background: var(--beef-surface);
+  color: var(--beef-text);
+}
+
+.beef-thread-message--agent {
+  position: relative;
+  padding-left: 16px;
+}
+
+.beef-thread-message--agent::before {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 0;
+  width: 2px;
+  background: var(--beef-active);
+  content: '';
+  opacity: 0.9;
+}
+
+.beef-tool-record {
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--beef-border);
+  border-radius: var(--bflabs-radius-surface);
+  background: color-mix(in srgb, var(--beef-surface) 72%, transparent);
 }
 
 .chat-typewriter-cursor {
@@ -2013,37 +2128,37 @@ body {
   --border-strong: var(--theme-surface-border-strong);
   --border-input: var(--theme-surface-border-strong);
   --divider: var(--theme-surface-titlebar);
-  --text: #171717;
-  --text-muted: #737373;
-  --text-faint: #a3a3a3;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-soft: #eff6ff;
-  --radius-card: 12px;
+  --text: var(--beef-text);
+  --text-muted: var(--beef-text-secondary);
+  --text-faint: color-mix(in srgb, var(--beef-text-secondary) 72%, transparent);
+  --accent: var(--beef-active);
+  --accent-hover: var(--beef-pressed);
+  --accent-soft: color-mix(in srgb, var(--beef-active) 12%, transparent);
+  --radius-card: var(--bflabs-radius-surface);
   background: var(--bg);
   overflow: hidden;
   font-size: 13px;
 }
 
 .dark .chat-window-shell .settings-embedded {
-  --bg: #212121;
-  --bg-sidebar: #1c1c1e;
-  --bg-savebar: #212121;
-  --bg-input: #2a2a2a;
-  --bg-input-subtle: #2a2a2a;
+  --bg: var(--beef-workbench);
+  --bg-sidebar: var(--beef-surface);
+  --bg-savebar: var(--beef-workbench);
+  --bg-input: var(--beef-raised);
+  --bg-input-subtle: var(--beef-surface);
   --bg-hover: rgba(255, 255, 255, 0.06);
   --bg-active: rgba(255, 255, 255, 0.1);
-  --bg-pill: #333333;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: #525252;
-  --border-input: #404040;
-  --divider: rgba(255, 255, 255, 0.06);
-  --text: #f5f5f5;
-  --text-muted: #a3a3a3;
-  --text-faint: #737373;
-  --accent: #3b82f6;
-  --accent-hover: #60a5fa;
-  --accent-soft: rgba(59, 130, 246, 0.15);
+  --bg-pill: var(--beef-raised);
+  --border: var(--beef-border);
+  --border-strong: color-mix(in srgb, var(--beef-text) 25%, transparent);
+  --border-input: color-mix(in srgb, var(--beef-text) 21%, transparent);
+  --divider: color-mix(in srgb, var(--beef-text) 7%, transparent);
+  --text: var(--beef-text);
+  --text-muted: var(--beef-text-secondary);
+  --text-faint: color-mix(in srgb, var(--beef-text-secondary) 68%, transparent);
+  --accent: var(--beef-active);
+  --accent-hover: var(--beef-pressed);
+  --accent-soft: rgba(255, 106, 51, 0.15);
 }
 
 .settings-embedded-nav {
@@ -2053,7 +2168,7 @@ body {
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: var(--bg-sidebar);
-  padding: 16px 8px 12px;
+  padding: 16px 10px 12px;
   overflow: hidden;
 }
 
@@ -2062,16 +2177,16 @@ body {
 }
 
 .dark .chat-window-shell .settings-embedded-nav {
-  border-right-color: rgba(255, 255, 255, 0.08);
-  background: #1c1c1e;
+  border-right-color: var(--beef-border);
+  background: var(--beef-surface);
 }
 
 .settings-embedded-nav-title {
   margin: 0 12px 12px;
   padding-top: 4px;
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-size: 16px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
   color: var(--text);
   user-select: none;
 }
@@ -2094,12 +2209,12 @@ body {
   width: 100%;
   padding: 8px 10px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--bflabs-radius-control);
   background: transparent;
   text-align: left;
   font-size: 13px;
   font-weight: 500;
-  color: #404040;
+  color: var(--text-muted);
   cursor: default;
   transition: background 0.12s ease, color 0.12s ease;
 }
@@ -2117,13 +2232,14 @@ body {
 }
 
 .settings-embedded-nav-item.active {
-  background: rgba(0, 0, 0, 0.06);
-  color: #171717;
+  box-shadow: inset 2px 0 0 var(--beef-active);
+  background: var(--bg-active);
+  color: var(--text);
 }
 
 .dark .chat-window-shell .settings-embedded-nav-item.active {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fafafa;
+  background: var(--bg-active);
+  color: var(--text);
 }
 
 .settings-embedded-nav-icon {
@@ -2201,7 +2317,7 @@ body {
 }
 
 .dark .chat-window-shell .settings-embedded-scroll {
-  background: #1a1a1a;
+  background: var(--beef-workbench);
 }
 
 /* 卡片式分组（Jan 白卡片 + 圆角） */
@@ -2211,7 +2327,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--bg);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  box-shadow: none;
 }
 
 .settings-embedded .kv-group + .kv-group {
@@ -2220,7 +2336,7 @@ body {
 }
 
 .dark .chat-window-shell .settings-embedded .kv-group {
-  background: #262626;
+  background: var(--beef-raised);
   box-shadow: none;
 }
 
@@ -2242,7 +2358,7 @@ body {
 }
 
 .settings-embedded .kv-panel {
-  border-radius: 10px;
+  border-radius: var(--bflabs-radius-surface);
   border-color: var(--border);
   background: var(--bg-input-subtle);
 }
@@ -2256,13 +2372,13 @@ body {
 
 .settings-embedded-savebar .kv-btn.primary {
   min-width: 72px;
-  border-radius: 8px;
+  border-radius: var(--bflabs-radius-control);
   padding: 6px 16px;
   font-weight: 500;
 }
 
 .settings-embedded-savebar .kv-btn:not(.primary) {
-  border-radius: 8px;
+  border-radius: var(--bflabs-radius-control);
 }
 
 /* 模型页：加宽、拉高左侧供应商列表，预设合并在列表内 */
@@ -2744,7 +2860,7 @@ body {
   }
 }
 
-/* ===== Kivio Settings redesign ===== */
+/* ===== Beefex Settings redesign ===== */
 .kv {
   --bg: var(--theme-surface);
   --bg-sidebar: var(--theme-surface-muted);

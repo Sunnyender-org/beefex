@@ -182,7 +182,7 @@ export function ContextIndicator({
   const tokenLine = `${formatTokenTotal(estimatedInputTokens, isReportedExact, approximatePrefix)} / ${windowLabel(contextWindowTokens, t)}`
   const sourceLabel = isExternalContext
     ? (isCliReported ? t.contextSourceCliReported : t.contextSourceCliEstimated)
-    : (isProviderReported ? t.contextSourceProviderReported : t.contextSourceKivio)
+    : (isProviderReported ? t.contextSourceProviderReported : t.contextSourceBeefex)
   const ringDegrees = usageRatio == null ? 0 : Math.max(0, Math.min(1, usageRatio)) * 360
   const canCompress = Boolean(onCompress) && !compressing && !loading && messageCount > 2
   const compressLabel = isExternalContext

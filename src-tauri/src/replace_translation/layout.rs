@@ -42,7 +42,7 @@ pub enum ReplaceTextAlign {
 pub type OcrLeaf = RapidOcrLine;
 
 /// The pixel mask is produced independently from translation grouping and
-/// render slots. Kivio uses 255 for pixels to erase and 0 for pixels to keep.
+/// render slots. Beefex uses 255 for pixels to erase and 0 for pixels to keep.
 pub type EraseMask = crate::inpainting::InpaintMask;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1032,7 +1032,7 @@ mod tests {
             span("s3", "run:", 160.0, 325.0, 80.0, 46.0),
             span(
                 "s4",
-                "xattr -cr /Applications/Kivio.app",
+                "xattr -cr /Applications/Beefex.app",
                 190.0,
                 397.0,
                 560.0,
@@ -1087,7 +1087,7 @@ mod tests {
     fn spaced_menu_rows_split_but_wrapped_item_lines_merge() {
         let image = RgbImage::from_pixel(720, 700, image::Rgb([255, 255, 255]));
         let spans = vec![
-            span("s0", "ZMGID/kivio", 129.0, 194.0, 167.0, 40.0),
+            span("s0", "ZMGID/beefex", 129.0, 194.0, 167.0, 40.0),
             span("s1", "ZMGID/Longtxt", 129.0, 251.0, 208.0, 43.0),
             span("s2", "hekaixin66-sketch/DFOX-", 129.0, 312.0, 340.0, 37.0),
             span(
@@ -1145,7 +1145,7 @@ mod tests {
     fn conservative_default_never_merges_spaced_menu_rows_into_one_translation_group() {
         let image = RgbImage::from_pixel(720, 700, image::Rgb([255, 255, 255]));
         let spans = vec![
-            span("s0", "ZMGID/kivio", 129.0, 194.0, 167.0, 40.0),
+            span("s0", "ZMGID/beefex", 129.0, 194.0, 167.0, 40.0),
             span("s1", "ZMGID/Longtxt", 129.0, 251.0, 208.0, 43.0),
             span("s2", "ZMGID/nabai", 129.0, 468.0, 180.0, 40.0),
         ];
@@ -1182,7 +1182,7 @@ mod tests {
         let spans = vec![
             span(
                 "s0",
-                "xattr -cr /Applications/Kivio.app",
+                "xattr -cr /Applications/Beefex.app",
                 190.0,
                 397.0,
                 560.0,
@@ -1248,19 +1248,19 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn layout_real_fixture() {
-        let model_dir = std::env::var_os("KIVIO_RAPIDOCR_MODEL_DIR")
+        let model_dir = std::env::var_os("BEEFEX_RAPIDOCR_MODEL_DIR")
             .map(std::path::PathBuf::from)
-            .expect("set KIVIO_RAPIDOCR_MODEL_DIR");
-        let image_path = std::env::var_os("KIVIO_REPLACE_LAYOUT_IMAGE")
+            .expect("set BEEFEX_RAPIDOCR_MODEL_DIR");
+        let image_path = std::env::var_os("BEEFEX_REPLACE_LAYOUT_IMAGE")
             .map(std::path::PathBuf::from)
-            .expect("set KIVIO_REPLACE_LAYOUT_IMAGE");
+            .expect("set BEEFEX_REPLACE_LAYOUT_IMAGE");
         let client =
             crate::rapidocr::RapidOcrClient::with_model_dir(model_dir, reqwest::Client::new());
         let spans = client
             .ocr_image_lines(&image_path, crate::rapidocr::ModelTier::High)
             .await
             .expect("run OCR");
-        if std::env::var_os("KIVIO_REPLACE_DEBUG_SPANS").is_some() {
+        if std::env::var_os("BEEFEX_REPLACE_DEBUG_SPANS").is_some() {
             eprintln!(
                 "{}",
                 serde_json::to_string_pretty(&spans).expect("serialize spans")

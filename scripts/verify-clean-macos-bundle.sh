@@ -17,11 +17,17 @@ bundle_id="$($plist_buddy -c 'Print :CFBundleIdentifier' "$info_plist")"
 bundle_name="$($plist_buddy -c 'Print :CFBundleName' "$info_plist")"
 executable_name="$($plist_buddy -c 'Print :CFBundleExecutable' "$info_plist")"
 executable="$app_path/Contents/MacOS/$executable_name"
+ocr_helper="$app_path/Contents/MacOS/beefex-ocr-helper"
 
 [[ "$bundle_id" == "com.beefapi.beefex" ]]
 [[ "$bundle_name" == "Beefex" ]]
 [[ -x "$executable" ]]
+[[ "$executable_name" == "beefex" ]]
+[[ -x "$ocr_helper" ]]
 file "$executable" | grep -q 'arm64'
+file "$ocr_helper" | grep -q 'arm64'
+[[ ! -e "$app_path/Contents/MacOS/kivio" ]]
+[[ ! -e "$app_path/Contents/MacOS/kivio-ocr-helper" ]]
 
 [[ -f "$resources/LICENSE" ]]
 [[ -f "$resources/NOTICE" ]]
@@ -65,7 +71,7 @@ if ! kill -0 "$app_pid" 2>/dev/null; then
 fi
 
 if find "$isolated_root" -path '*/.kivio/skills-staged*' -print -quit | grep -q .; then
-  echo 'Managed startup created a forbidden Kivio staged-skill path.' >&2
+  echo 'Managed startup created a forbidden legacy staged-skill path.' >&2
   exit 1
 fi
 

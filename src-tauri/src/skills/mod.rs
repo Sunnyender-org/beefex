@@ -5,10 +5,7 @@ mod runtime;
 mod types;
 
 pub use catalog::format_catalog;
-pub use discover::{
-    build_registry, build_registry_headless, build_registry_metadata, user_skills_dir,
-    user_skills_dir_headless,
-};
+pub use discover::{build_registry, build_registry_metadata, user_skills_dir};
 pub use parse::parse_skill_markdown;
 pub use runtime::{
     activate_skill, extract_skill_name, lookup_skill, substitute_arguments, SkillRunCache,
@@ -40,17 +37,10 @@ pub fn chat_skills_list(
     match build_registry_metadata(&app, &paths) {
         Ok(registry) => {
             let settings = state.settings_read();
-            // 插件附属 skill（source=plugin）一并返回，技能页单独分区展示；
-            // 开关仍由「扩展 → 插件」统一管理（前端禁止在技能页改插件 skill）。
             let skills = registry
                 .metas()
                 .into_iter()
                 .filter(|meta| {
-                    if meta.source == "plugin"
-                        || crate::plugins::skill_owned_by_plugin(&meta.id).is_some()
-                    {
-                        return true;
-                    }
                     crate::settings::skill_connector_satisfied(
                         &meta.id,
                         &settings.email_accounts,
@@ -329,7 +319,7 @@ mod tests {
 
     #[test]
     fn install_skill_zip_bytes_lands_skill_and_files() {
-        let dir = std::env::temp_dir().join(format!("kivio-skilltest-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("beefex-skilltest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -343,7 +333,7 @@ mod tests {
 
     #[test]
     fn install_skill_zip_bytes_bad_zip_errors_without_dir() {
-        let dir = std::env::temp_dir().join(format!("kivio-skilltest-bad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("beefex-skilltest-bad-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 

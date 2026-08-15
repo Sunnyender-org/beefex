@@ -23,7 +23,7 @@ describe('ToolCallBlock', () => {
     expect(within(button).getByText('README.md')).toBeInTheDocument()
     // 已删除的后缀 / 全路径不再出现在折叠行
     expect(within(button).queryByText(/已完成/)).not.toBeInTheDocument()
-    expect(within(button).queryByText(/Kivio/)).not.toBeInTheDocument()
+    expect(within(button).queryByText(/Beefex/)).not.toBeInTheDocument()
     expect(within(button).queryByText(/file contents loaded/)).not.toBeInTheDocument()
     expect(within(button).queryByText(/src\/a/)).not.toBeInTheDocument()
   })

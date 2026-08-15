@@ -21,6 +21,7 @@
     "test:pi-managed-broker": "node scripts/verify-pi-managed-broker.mjs",
     "test:pi-project-trust": "node scripts/verify-pi-project-trust.mjs",
     "test:pi-rpc-local": "node scripts/verify-pi-rpc-local.mjs",
+    "check:identity": "bash scripts/check-beefex-identity.sh",
     "test:replace-visual": "node scripts/generate-replace-visual-fixtures.mjs --check && vitest run src/lens/replaceVisualBenchmark.test.ts",
     "fixtures:replace-visual": "node scripts/generate-replace-visual-fixtures.mjs",
     "test:watch": "vitest",

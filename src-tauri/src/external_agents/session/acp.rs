@@ -196,7 +196,7 @@ pub async fn detect_acp_models(
         json!({
             "protocolVersion": ACP_PROTOCOL_VERSION,
             "clientCapabilities": { "terminal": false },
-            "clientInfo": { "name": "kivio", "version": "external-agents" },
+            "clientInfo": { "name": "beefex", "version": "external-agents" },
         }),
     )
     .await
@@ -325,7 +325,7 @@ pub async fn detect_acp_commands(
         json!({
             "protocolVersion": ACP_PROTOCOL_VERSION,
             "clientCapabilities": { "terminal": false },
-            "clientInfo": { "name": "kivio", "version": "external-agents" },
+            "clientInfo": { "name": "beefex", "version": "external-agents" },
         }),
     )
     .await
@@ -606,7 +606,7 @@ pub async fn run_acp_session(
         json!({
             "protocolVersion": ACP_PROTOCOL_VERSION,
             "clientCapabilities": { "terminal": false },
-            "clientInfo": { "name": "kivio", "version": "external-agents" },
+            "clientInfo": { "name": "beefex", "version": "external-agents" },
         }),
     )
     .await?;
@@ -893,7 +893,7 @@ impl AcpSession {
             json!({
                 "protocolVersion": ACP_PROTOCOL_VERSION,
                 "clientCapabilities": { "terminal": false },
-                "clientInfo": { "name": "kivio", "version": "external-agents" },
+                "clientInfo": { "name": "beefex", "version": "external-agents" },
             }),
         )
         .await?;

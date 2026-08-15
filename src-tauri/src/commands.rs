@@ -230,7 +230,7 @@ const SETTINGS_BACKUP_VERSION: u32 = 1;
 pub(crate) fn export_settings(state: State<AppState>, path: String) -> Result<(), String> {
     let settings = state.settings_read().clone();
     let backup = serde_json::json!({
-        "app": "kivio",
+        "app": "beefex",
         "type": "settings-backup",
         "version": SETTINGS_BACKUP_VERSION,
         "settings": serde_json::to_value(&settings).map_err(|e| e.to_string())?,
@@ -251,7 +251,7 @@ pub(crate) fn import_settings(
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|_| "文件不是有效的 JSON".to_string())?;
     if value.get("type").and_then(|v| v.as_str()) != Some("settings-backup") {
-        return Err("这不是 Kivio 设置备份文件".to_string());
+        return Err("这不是 Beefex 设置备份文件".to_string());
     }
     let settings_value = value
         .get("settings")
@@ -344,7 +344,7 @@ pub(crate) async fn commit_translation(
     #[cfg(target_os = "macos")]
     crate::windows::forget_frontmost_app(&state.prev_frontmost_pid_main);
 
-    // macOS 输入翻译窗口被重分类为 KivioOverlayPanel；必须先换回 TaoWindow 再 destroy，
+    // macOS 输入翻译窗口被重分类为 BeefexOverlayPanel；必须先换回 TaoWindow 再 destroy，
     // 否则 WebKit 清理 contentLayoutRect KVO observer 时会抛 ObjC 异常并让 Rust abort。
     #[cfg(target_os = "macos")]
     if let Some(window) = get_main_window(&app) {
@@ -399,7 +399,7 @@ pub(crate) fn open_external(app: AppHandle, url: String) -> Result<(), String> {
 #[allow(deprecated)]
 pub(crate) fn open_html_preview(app: AppHandle, html: String) -> Result<(), String> {
     let path =
-        std::env::temp_dir().join(format!("kivio-html-preview-{}.html", uuid::Uuid::new_v4()));
+        std::env::temp_dir().join(format!("beefex-html-preview-{}.html", uuid::Uuid::new_v4()));
     std::fs::write(&path, html).map_err(|e| format!("Write HTML preview failed: {e}"))?;
     let path_str = path
         .to_str()

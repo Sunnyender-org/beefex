@@ -139,8 +139,8 @@ pub struct AppState {
     pub explain_images: Mutex<HashMap<String, PathBuf>>,
     pub current_explain_image_id: Mutex<Option<String>>,
     pub lens_busy: AtomicBool,
-    /// macOS：打开浮窗前记下的前台 App PID（0 = 无 / 前台就是 Kivio 自己），关闭浮窗时据此把
-    /// 前台交还给原来的 App，避免 Kivio 变成"前台却无窗口"而触发 RunEvent::Reopen 误开 Chat。
+    /// macOS：打开浮窗前记下的前台 App PID（0 = 无 / 前台就是 Beefex 自己），关闭浮窗时据此把
+    /// 前台交还给原来的 App，避免 Beefex 变成"前台却无窗口"而触发 RunEvent::Reopen 误开 Chat。
     /// lens（含截图/选词翻译）与输入翻译是各自独立、可同时存在的浮窗，各占一个槽，避免相互覆盖。
     /// 详见 spec/backend/window-lifecycle.md。
     pub prev_frontmost_pid_lens: AtomicI32,
@@ -352,7 +352,7 @@ impl AppState {
         }
     }
 
-    /// Build a headless `AppState` for the `kivio-code` terminal agent — no
+    /// Build a headless `AppState` for the `beefex-code` terminal agent — no
     /// `AppHandle`, no Tauri runtime. Differs from the live construction in
     /// `lib.rs::run` only in the two OCR clients (`headless()` constructors) and
     /// `usage_dir` (passed in). The agent loop only touches `settings`, the
@@ -1165,7 +1165,7 @@ pub(crate) fn test_app_state() -> AppState {
     let offline_models = OfflineModelManager::headless(Client::new());
     AppState::base(
         Settings::default(),
-        std::env::temp_dir().join(format!("kivio-test-usage-{}", uuid::Uuid::new_v4())),
+        std::env::temp_dir().join(format!("beefex-test-usage-{}", uuid::Uuid::new_v4())),
         Client::new(),
         Arc::new(AccountService::unavailable()),
         #[cfg(target_os = "macos")]

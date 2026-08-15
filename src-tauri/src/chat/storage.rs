@@ -1896,7 +1896,7 @@ mod index_self_heal_tests {
     use std::fs;
 
     fn temp_dir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("kivio-storage-test-{}", uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!("beefex-storage-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&d).unwrap();
         d
     }
