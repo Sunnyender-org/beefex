@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -363,6 +363,8 @@ interface InputBarProps {
     content: string,
     attachments: PendingAttachment[],
   ) => boolean | void | Promise<boolean | void>
+  /** Shared by the welcome and conversation composers so a route-driven remount cannot resubmit one physical action. */
+  submissionLockRef?: MutableRefObject<boolean>
   disabled?: boolean
   onCancel?: () => void
   cancelVisible?: boolean
@@ -419,6 +421,7 @@ interface InputBarProps {
 
 export function InputBar({
   onSend,
+  submissionLockRef,
   disabled,
   onCancel,
   cancelVisible,
@@ -471,7 +474,8 @@ export function InputBar({
   const [projectOptionsLoading, setProjectOptionsLoading] = useState(false)
   const [projectOptionsError, setProjectOptionsError] = useState('')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
-  const sendSubmissionInFlightRef = useRef(false)
+  const localSubmissionLockRef = useRef(false)
+  const sendSubmissionInFlightRef = submissionLockRef ?? localSubmissionLockRef
   const [projectCreating, setProjectCreating] = useState(false)
   const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false)
   const [slashPanelOpen, setSlashPanelOpen] = useState(false)

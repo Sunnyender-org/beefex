@@ -680,6 +680,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [contextError, setContextError] = useState('')
   const [imageViewerItem, setImageViewerItem] = useState<ChatImageViewerItem | null>(null)
   const currentConversationIdRef = useRef<string | null>(null)
+  // The welcome composer is replaced by the conversation composer as soon as the first send
+  // creates a conversation. Keep the lock above both instances so one Windows accessibility
+  // action cannot land once on each mounted button.
+  const composerSubmissionLockRef = useRef(false)
   // 始终指向最新 currentConversation。消息操作 handler（编辑/删除/重发）借此读取最新会话，
   // 而无需把 currentConversation 列进 useCallback 依赖——否则每次切模型/思考等级（currentConversation
   // 换引用）这些 handler 都换身份，打穿 MessageBubble 的 memo 导致全列表重渲（公式 remount 闪烁）。
@@ -3483,6 +3487,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     <InputBar
                       layout="inline"
                       onSend={(content, attachments) => handleSendMessage(content, attachments)}
+                      submissionLockRef={composerSubmissionLockRef}
                       disabled={isCurrentConversationBusy()}
                       onCancel={() => void handleCancelStream()}
                       cancelVisible={streamCoarse.streaming}
@@ -3587,6 +3592,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                   )}
                   <InputBar
                     onSend={(content, attachments) => handleSendMessage(content, attachments)}
+                    submissionLockRef={composerSubmissionLockRef}
                     disabled={isCurrentConversationBusy()}
                     onCancel={() => void handleCancelStream()}
                     cancelVisible={streamCoarse.streaming}
