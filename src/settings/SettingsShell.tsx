@@ -66,8 +66,9 @@ import {
 import { ConnectorsPanel } from './ConnectorsPanel'
 import { KnowledgeBasePanel } from './KnowledgeBasePanel'
 import { WebSearchPanel } from './WebSearchPanel'
+import { ClientIntegrationsPanel } from './ClientIntegrationsPanel'
 
-export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'mcp' | 'skill' | 'webSearch' | 'connectors' | 'knowledge' | 'usage' | 'providers' | 'about'
+export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'mcp' | 'skill' | 'webSearch' | 'connectors' | 'knowledge' | 'usage' | 'providers' | 'clientIntegrations' | 'about'
 
 type SettingsData = SettingsType
 type MemoryLayerKey = 'l1' | 'l2'
@@ -2297,6 +2298,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     { id: 'webSearch' as const, label: t.tabWebSearch, icon: WebSearchIcon },
     { id: 'usage' as const, label: lang === 'zh' ? '用量统计' : 'Usage', icon: UsageIcon },
     { id: 'providers' as const, label: t.tabModels, icon: ProvidersIcon },
+    { id: 'clientIntegrations' as const, label: lang === 'zh' ? '客户端集成' : 'Client integrations', icon: KeyRound },
   ]
   const pageMeta: Record<typeof activeTab, { title: string; subtitle: string; right?: string }> = {
     general: {
@@ -2368,6 +2370,12 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     providers: {
       title: t.tabModels,
       subtitle: lang === 'zh' ? '管理 OpenAI 兼容供应商、密钥和启用模型。' : 'Manage OpenAI-compatible providers, keys, and enabled models.',
+    },
+    clientIntegrations: {
+      title: lang === 'zh' ? '客户端集成' : 'Client integrations',
+      subtitle: lang === 'zh'
+        ? '让其他第一方 coding agent 使用 BeefAPI；当前仅支持 Codex。'
+        : 'Use BeefAPI from other first-party coding agents; Codex is supported first.',
     },
     about: {
       title: lang === 'zh' ? '关于' : 'About',
@@ -4542,6 +4550,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 </div>
               </div>
             )}
+
+            {activeTab === 'clientIntegrations' && <ClientIntegrationsPanel lang={lang} />}
 
             {/* ===== 关于标签页 ===== */}
             {activeTab === 'about' && (

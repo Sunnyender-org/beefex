@@ -139,6 +139,29 @@ pub(crate) struct ManagedCredential {
     pub group: String,
 }
 
+pub(crate) struct ManagedClientCredential {
+    pub credential: SecretCredential,
+    pub group: String,
+}
+
+impl std::fmt::Debug for ManagedClientCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedClientCredential")
+            .field("credential", &"<redacted>")
+            .field("group", &self.group)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ManagedClientCredentials {
+    pub origin: String,
+    pub gpt: ManagedClientCredential,
+    pub claude: ManagedClientCredential,
+    pub grok: ManagedClientCredential,
+}
+
 impl std::fmt::Debug for ManagedCredential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

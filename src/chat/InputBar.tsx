@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -359,7 +359,12 @@ function readFileAsBase64(file: File): Promise<string> {
 }
 
 interface InputBarProps {
-  onSend: (content: string, attachments: PendingAttachment[]) => void
+  onSend: (
+    content: string,
+    attachments: PendingAttachment[],
+  ) => boolean | void | Promise<boolean | void>
+  /** Shared by the welcome and conversation composers so a route-driven remount cannot resubmit one physical action. */
+  submissionLockRef?: MutableRefObject<boolean>
   disabled?: boolean
   onCancel?: () => void
   cancelVisible?: boolean
@@ -416,6 +421,7 @@ interface InputBarProps {
 
 export function InputBar({
   onSend,
+  submissionLockRef,
   disabled,
   onCancel,
   cancelVisible,
@@ -468,6 +474,8 @@ export function InputBar({
   const [projectOptionsLoading, setProjectOptionsLoading] = useState(false)
   const [projectOptionsError, setProjectOptionsError] = useState('')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
+  const localSubmissionLockRef = useRef(false)
+  const sendSubmissionInFlightRef = submissionLockRef ?? localSubmissionLockRef
   const [projectCreating, setProjectCreating] = useState(false)
   const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false)
   const [slashPanelOpen, setSlashPanelOpen] = useState(false)
@@ -921,10 +929,16 @@ export function InputBar({
     updateTextareaHeight,
   ])
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmed = input.trim()
-    if ((!trimmed && attachments.length === 0) || disabled || sendDisabledReason) return
-    onSend(trimmed, attachments)
+    if (
+      sendSubmissionInFlightRef.current
+      || (!trimmed && attachments.length === 0)
+      || disabled
+      || sendDisabledReason
+    ) return
+    sendSubmissionInFlightRef.current = true
+    const submittedAttachments = attachments
     setInput('')
     setAttachments([])
     setAttachmentError('')
@@ -934,6 +948,11 @@ export function InputBar({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
       textareaRef.current.style.overflowY = 'hidden'
+    }
+    try {
+      await onSend(trimmed, submittedAttachments)
+    } finally {
+      sendSubmissionInFlightRef.current = false
     }
   }
 
@@ -990,7 +1009,7 @@ export function InputBar({
 
     if (e.key !== 'Enter' || e.shiftKey) return
     e.preventDefault()
-    handleSend()
+    void handleSend()
   }
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1780,7 +1799,7 @@ export function InputBar({
             <div className="relative h-9 w-9 shrink-0">
               <button
                 type="button"
-                onClick={handleSend}
+                onClick={() => void handleSend()}
                 disabled={!canSend}
                 tabIndex={-1}
                 title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}

@@ -602,6 +602,11 @@ type SendMessageOptions = {
   conversationOverride?: Conversation | null
 }
 
+// Creating the first conversation changes the hash route and may remount Chat itself.
+// Keep this lock at module scope so one physical accessibility action cannot be replayed
+// into the replacement composer while the original send is still settling.
+const composerSubmissionLockRef = { current: false }
+
 export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const beefApiAccount = useBeefApiAccount()
   const [chatView, setChatView] = useState<ChatView>(() => {
@@ -3482,7 +3487,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     </div>
                     <InputBar
                       layout="inline"
-                      onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                      onSend={(content, attachments) => handleSendMessage(content, attachments)}
+                      submissionLockRef={composerSubmissionLockRef}
                       disabled={isCurrentConversationBusy()}
                       onCancel={() => void handleCancelStream()}
                       cancelVisible={streamCoarse.streaming}
@@ -3586,7 +3592,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     />
                   )}
                   <InputBar
-                    onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                    onSend={(content, attachments) => handleSendMessage(content, attachments)}
+                    submissionLockRef={composerSubmissionLockRef}
                     disabled={isCurrentConversationBusy()}
                     onCancel={() => void handleCancelStream()}
                     cancelVisible={streamCoarse.streaming}

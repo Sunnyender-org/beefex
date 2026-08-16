@@ -480,6 +480,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-store",
  "tokio",
+ "toml 0.9.11+spec-1.1.0",
+ "toml_edit 0.23.10+spec-1.0.0",
  "unicode-normalization",
  "url",
  "uuid",
@@ -7138,6 +7140,7 @@ dependencies = [
  "indexmap 2.13.0",
  "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 0.7.14",
 ]
 

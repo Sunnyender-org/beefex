@@ -1497,6 +1497,62 @@ export type BeefApiAccountState = {
   reason?: string
 }
 
+export type CodexPluginStatus = {
+  state: 'missing' | 'unsupported' | 'ready' | 'configured' | 'conflict' | 'failed'
+  codexVersion?: string
+  supported: boolean
+  codexHome: string
+  profilePath: string
+  credentialPresent: boolean
+  configuredModel?: string
+  launchCommand: string
+  reason?: string
+}
+
+export type CodexPluginChange = {
+  path: string
+  action: string
+  description: string
+}
+
+export type CodexPluginPreview = {
+  status: CodexPluginStatus
+  model: string
+  configPreview: string
+  changes: CodexPluginChange[]
+  credentialContract: string
+}
+
+export type CodexPluginOperationReceipt = {
+  operation: 'apply' | 'verify' | 'rollback'
+  status: CodexPluginStatus
+  changedPaths: string[]
+  backupPath?: string
+  configValid: boolean
+  doctorSummary?: string
+}
+
+export type ManagedClientItem = {
+  id: 'codex' | 'image2' | 'claude-code' | 'claude-desktop' | 'grok'
+  detected: boolean
+  configured: boolean
+  launchCommand: string
+  reason?: string
+}
+
+export type ManagedClientsStatus = {
+  state: 'ready' | 'partial' | 'configured'
+  clients: ManagedClientItem[]
+  reason?: string
+}
+
+export type ManagedClientsReceipt = {
+  operation: 'apply' | 'verify' | 'rollback'
+  status: ManagedClientsStatus
+  changedPaths: string[]
+  checks: string[]
+}
+
 export type RendererDiagnosticInput = {
   transition: 'window_error' | 'unhandled_rejection'
   errorClass: string
@@ -1558,6 +1614,19 @@ export const api = {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<BeefApiAccountState>('beefapi-account-state', listener)
   },
+
+  codexPluginInspect: () => invoke<CodexPluginStatus>('codex_plugin_inspect'),
+  codexPluginPreview: (model: string) =>
+    invoke<CodexPluginPreview>('codex_plugin_preview', { model }),
+  codexPluginApply: (model: string) =>
+    invoke<CodexPluginOperationReceipt>('codex_plugin_apply', { model }),
+  codexPluginVerify: () => invoke<CodexPluginOperationReceipt>('codex_plugin_verify'),
+  codexPluginRollback: () => invoke<CodexPluginOperationReceipt>('codex_plugin_rollback'),
+  managedClientsInspect: () => invoke<ManagedClientsStatus>('managed_clients_inspect'),
+  managedClientsApply: (model: string) =>
+    invoke<ManagedClientsReceipt>('managed_clients_apply', { model }),
+  managedClientsVerify: () => invoke<ManagedClientsReceipt>('managed_clients_verify'),
+  managedClientsRollback: () => invoke<ManagedClientsReceipt>('managed_clients_rollback'),
 
   // 设置相关
   getSettings: async () => normalizeSettings(await invoke<Settings>('get_settings')),

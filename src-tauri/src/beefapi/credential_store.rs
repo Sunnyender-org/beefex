@@ -410,7 +410,7 @@ fn validate_windows_private_acl(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn atomic_replace_windows(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn atomic_replace_windows(source: &Path, destination: &Path) -> Result<(), String> {
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
         MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
