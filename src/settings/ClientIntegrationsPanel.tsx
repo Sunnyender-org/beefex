@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { CheckCircle2, ExternalLink, RefreshCw, RotateCcw, ShieldCheck, TerminalSquare } from 'lucide-react'
+import { CheckCircle2, Copy, ExternalLink, RefreshCw, RotateCcw, ShieldCheck, TerminalSquare } from 'lucide-react'
 import { api, type CodexPluginPreview, type CodexPluginStatus } from '../api/tauri'
 import { useBeefApiAccount } from '../beefapi/useBeefApiAccount'
 import { Button } from '../components/Button'
+import { copyToClipboard } from '../utils/clipboard'
 import { Input, Select, SettingRow, SettingsGroup } from './components'
 
 type Props = { lang: string }
@@ -110,6 +111,7 @@ export function ClientIntegrationsPanel({ lang }: Props) {
     && status?.supported
     && (status.state === 'ready' || status.state === 'configured')
     && !busy
+  const launchCommand = status?.launchCommand || 'codex --profile beefapi'
 
   return (
     <>
@@ -218,7 +220,18 @@ export function ClientIntegrationsPanel({ lang }: Props) {
       <div className="mt-3 flex items-center gap-1.5 text-[11px] text-neutral-500">
         <ExternalLink size={11} />
         <span>{lang === 'zh' ? '启动命令：' : 'Launch command: '}</span>
-        <code>{status?.launchCommand || 'codex --profile beefapi'}</code>
+        <code>{launchCommand}</code>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => void run('copy', async () => {
+            if (!await copyToClipboard(launchCommand)) throw new Error('codex_plugin_copy_failed')
+            setNotice(lang === 'zh' ? '启动命令已复制。' : 'Launch command copied.')
+          })}
+          disabled={Boolean(busy)}
+        >
+          <Copy size={11} /> {lang === 'zh' ? '复制' : 'Copy'}
+        </Button>
       </div>
     </>
   )
