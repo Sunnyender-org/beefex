@@ -22,7 +22,16 @@ use toml_edit::{value, DocumentMut, Item, Table};
 const RECEIPT_VERSION: u8 = 1;
 const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 const GROK_MODEL: &str = "grok-4.6";
-const IMAGE2_INSTALLER: &str = "beefapi-codex-image2.sh";
+const IMAGE2_INSTALLER_UNIX: &str = "beefapi-codex-image2.sh";
+const IMAGE2_INSTALLER_WINDOWS: &str = "beefapi-codex-image2.ps1";
+
+fn image2_installer_name() -> &'static str {
+    if cfg!(windows) {
+        IMAGE2_INSTALLER_WINDOWS
+    } else {
+        IMAGE2_INSTALLER_UNIX
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ManagedPaths {
@@ -536,14 +545,15 @@ fn inspect_with(paths: &ManagedPaths) -> Result<ManagedClientsStatus, String> {
 }
 
 fn image2_installer(app: &AppHandle) -> Result<PathBuf, String> {
+    let installer = image2_installer_name();
     let packaged = app
         .path()
         .resource_dir()
         .ok()
-        .map(|p| p.join("client-plugins").join(IMAGE2_INSTALLER));
+        .map(|p| p.join("client-plugins").join(installer));
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("resources/client-plugins")
-        .join(IMAGE2_INSTALLER);
+        .join(installer);
     packaged
         .filter(|p| p.is_file())
         .or_else(|| development.is_file().then_some(development))
@@ -762,6 +772,15 @@ mod tests {
             claude_profiles_meta: root.join("Claude-3p/profiles/_meta.json"),
             grok: root.join(".grok/config.toml"),
             image2_cli: root.join(".codex/skills/beefapi-image2/scripts/beefapi-image2.mjs"),
+        }
+    }
+
+    #[test]
+    fn image2_installer_matches_host_shell() {
+        if cfg!(windows) {
+            assert_eq!(image2_installer_name(), "beefapi-codex-image2.ps1");
+        } else {
+            assert_eq!(image2_installer_name(), "beefapi-codex-image2.sh");
         }
     }
 
