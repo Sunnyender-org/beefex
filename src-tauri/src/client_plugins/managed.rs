@@ -598,6 +598,49 @@ fn image2_installer(app: &AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "managed_clients_image2_installer_missing".into())
 }
 
+#[cfg(windows)]
+fn subprocess_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn subprocess_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn image2_install_error(stdout: &[u8], stderr: &[u8]) -> String {
+    let output = format!(
+        "{} {}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+    .to_ascii_lowercase();
+    if output.contains("could not restrict the windows credential-file acl") {
+        "managed_clients_image2_permissions_failed"
+    } else if output.contains("non-beefapi or locally modified command") {
+        "managed_clients_image2_conflict"
+    } else if output.contains("installer payload is missing") {
+        "managed_clients_image2_installer_invalid"
+    } else if output.contains("node 18+ is required")
+        || output.contains("the term 'node' is not recognized")
+        || output.contains("'node' is not recognized")
+    {
+        "managed_clients_image2_node_unavailable"
+    } else if output.contains("credential setup failed") {
+        "managed_clients_image2_setup_failed"
+    } else {
+        "managed_clients_image2_install_failed"
+    }
+    .into()
+}
+
 fn install_image2(
     app: &AppHandle,
     origin: &str,
@@ -617,18 +660,16 @@ fn install_image2(
     } else {
         Command::new("/bin/sh")
     };
-    let status = command
-        .arg(installer)
+    let output = command
+        .arg(subprocess_path(&installer))
         .arg("--skip-check")
         .env("BEEFAPI_IMAGE2_API_KEY", credential.expose())
         .env("BEEFAPI_IMAGE2_BASE_URL", origin.trim_end_matches('/'))
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .map_err(|_| "managed_clients_image2_install_failed".to_string())?;
-    if !status.success() {
-        return Err("managed_clients_image2_install_failed".into());
+    if !output.status.success() {
+        return Err(image2_install_error(&output.stdout, &output.stderr));
     }
     Ok(())
 }
@@ -835,6 +876,34 @@ mod tests {
         } else {
             assert_eq!(image2_installer_name(), "beefapi-codex-image2.sh");
         }
+    }
+
+    #[test]
+    fn image2_install_errors_are_classified_without_returning_process_output() {
+        assert_eq!(
+            image2_install_error(
+                b"",
+                b"Could not restrict the Windows credential-file ACL. secret=do-not-return"
+            ),
+            "managed_clients_image2_permissions_failed"
+        );
+        assert_eq!(
+            image2_install_error(b"", b"unexpected failure at C:\\private\\path"),
+            "managed_clients_image2_install_failed"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_subprocess_path_strips_verbatim_prefixes() {
+        assert_eq!(
+            subprocess_path(Path::new(r"\\?\C:\Beefex\installer.ps1")),
+            PathBuf::from(r"C:\Beefex\installer.ps1")
+        );
+        assert_eq!(
+            subprocess_path(Path::new(r"\\?\UNC\server\share\installer.ps1")),
+            PathBuf::from(r"\\server\share\installer.ps1")
+        );
     }
 
     #[test]
