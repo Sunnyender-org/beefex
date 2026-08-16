@@ -6,6 +6,7 @@ pub mod app_paths;
 pub(crate) mod beefapi;
 pub mod capture_geometry;
 pub mod chat;
+pub mod client_plugins;
 pub mod commands;
 pub mod connectors;
 pub mod diagnostics;
@@ -598,6 +599,11 @@ pub fn run() {
             chat::commands::mutations::chat_set_group_selection,
             chat::commands::mutations::chat_regenerate_message,
             chat::commands::mutations::chat_fork_conversation,
+            client_plugins::codex::codex_plugin_inspect,
+            client_plugins::codex::codex_plugin_preview,
+            client_plugins::codex::codex_plugin_apply,
+            client_plugins::codex::codex_plugin_verify,
+            client_plugins::codex::codex_plugin_rollback,
             external_agents::commands::chat_list_external_cli_slash_commands,
             external_agents::commands::chat_pi_project_trust_preview,
             external_agents::commands::chat_pi_set_project_trust,
