@@ -95,12 +95,21 @@ jobs:
         run: ./scripts/win-cargo-test.ps1
 
       - name: Build unsigned NSIS acceptance package
-        run: npm run tauri -- build --bundles nsis --no-sign --ci
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\src-tauri\target-ci-release
+        run: |
+          npm run tauri -- build --bundles nsis --no-sign --ci
+          $currentShell = Get-ChildItem .\dist\assets\*.js |
+            Select-String -Pattern 'PI WORKBENCH' -SimpleMatch -Quiet
+          if (-not $currentShell) {
+            throw 'built frontend is missing the current Beefex PI WORKBENCH marker'
+          }
 
       - name: Retain unsigned NSIS acceptance artifact
         uses: actions/upload-artifact@v4
         with:
           name: beefex-windows-x64-unsigned-${{ github.sha }}
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: src-tauri/target-ci-release/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
