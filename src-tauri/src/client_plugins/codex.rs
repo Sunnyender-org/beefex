@@ -383,10 +383,10 @@ fn configured_model(bytes: &[u8]) -> Option<String> {
         .ok()?
         .parse::<DocumentMut>()
         .ok()?;
-    if doc["model_provider"].as_str() != Some("beefapi") {
+    if doc.get("model_provider").and_then(Item::as_str) != Some("beefapi") {
         return None;
     }
-    doc["model"].as_str().map(str::to_string)
+    doc.get("model").and_then(Item::as_str).map(str::to_string)
 }
 
 fn inspect_with(
@@ -633,6 +633,21 @@ mod tests {
         assert!(merged.contains("model_provider = \"beefapi\""));
         assert!(merged.contains("[model_providers.beefapi]"));
         assert!(!merged.contains("--profile"));
+    }
+
+    #[test]
+    fn inspect_handles_existing_config_without_managed_keys() {
+        let paths = fixture_paths("inspect-unmanaged");
+        atomic_write(
+            &paths.config,
+            b"approval_policy = \"on-request\"\n[features]\nweb_search = true\n",
+        )
+        .unwrap();
+
+        let status = inspect_with(&paths, supported()).unwrap();
+
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.reason, None);
     }
 
     #[tokio::test]
