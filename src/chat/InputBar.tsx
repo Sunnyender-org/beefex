@@ -359,7 +359,10 @@ function readFileAsBase64(file: File): Promise<string> {
 }
 
 interface InputBarProps {
-  onSend: (content: string, attachments: PendingAttachment[]) => void
+  onSend: (
+    content: string,
+    attachments: PendingAttachment[],
+  ) => boolean | void | Promise<boolean | void>
   disabled?: boolean
   onCancel?: () => void
   cancelVisible?: boolean
@@ -468,6 +471,7 @@ export function InputBar({
   const [projectOptionsLoading, setProjectOptionsLoading] = useState(false)
   const [projectOptionsError, setProjectOptionsError] = useState('')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
+  const sendSubmissionInFlightRef = useRef(false)
   const [projectCreating, setProjectCreating] = useState(false)
   const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false)
   const [slashPanelOpen, setSlashPanelOpen] = useState(false)
@@ -921,10 +925,16 @@ export function InputBar({
     updateTextareaHeight,
   ])
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmed = input.trim()
-    if ((!trimmed && attachments.length === 0) || disabled || sendDisabledReason) return
-    onSend(trimmed, attachments)
+    if (
+      sendSubmissionInFlightRef.current
+      || (!trimmed && attachments.length === 0)
+      || disabled
+      || sendDisabledReason
+    ) return
+    sendSubmissionInFlightRef.current = true
+    const submittedAttachments = attachments
     setInput('')
     setAttachments([])
     setAttachmentError('')
@@ -934,6 +944,11 @@ export function InputBar({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
       textareaRef.current.style.overflowY = 'hidden'
+    }
+    try {
+      await onSend(trimmed, submittedAttachments)
+    } finally {
+      sendSubmissionInFlightRef.current = false
     }
   }
 
@@ -990,7 +1005,7 @@ export function InputBar({
 
     if (e.key !== 'Enter' || e.shiftKey) return
     e.preventDefault()
-    handleSend()
+    void handleSend()
   }
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1780,7 +1795,7 @@ export function InputBar({
             <div className="relative h-9 w-9 shrink-0">
               <button
                 type="button"
-                onClick={handleSend}
+                onClick={() => void handleSend()}
                 disabled={!canSend}
                 tabIndex={-1}
                 title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}

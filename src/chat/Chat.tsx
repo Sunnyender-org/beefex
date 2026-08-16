@@ -3482,7 +3482,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     </div>
                     <InputBar
                       layout="inline"
-                      onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                      onSend={(content, attachments) => handleSendMessage(content, attachments)}
                       disabled={isCurrentConversationBusy()}
                       onCancel={() => void handleCancelStream()}
                       cancelVisible={streamCoarse.streaming}
@@ -3586,7 +3586,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     />
                   )}
                   <InputBar
-                    onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                    onSend={(content, attachments) => handleSendMessage(content, attachments)}
                     disabled={isCurrentConversationBusy()}
                     onCancel={() => void handleCancelStream()}
                     cancelVisible={streamCoarse.streaming}
