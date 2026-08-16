@@ -285,11 +285,29 @@ fn validate_root(path: PathBuf, label: &str) -> Result<PathBuf, String> {
         return Err(format!("{label}_relative"));
     }
     if let Ok(metadata) = fs::symlink_metadata(&path) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || windows_path_is_reparse_point(&path)
+        {
             return Err(format!("{label}_unsafe"));
         }
     }
     Ok(path)
+}
+
+#[cfg(windows)]
+fn windows_path_is_reparse_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn windows_path_is_reparse_point(_path: &Path) -> bool {
+    false
 }
 
 fn resolve_paths() -> Result<CodexPluginPaths, String> {
@@ -335,6 +353,7 @@ fn read_managed_profile(path: &Path) -> Result<Option<String>, String> {
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() > MAX_MANAGED_FILE_BYTES
+        || windows_path_is_reparse_point(path)
     {
         return Err("codex_plugin_profile_read_failed".to_string());
     }
@@ -360,11 +379,17 @@ fn write_managed_profile(path: &Path, value: &str) -> Result<(), String> {
     fs::create_dir_all(parent).map_err(|_| "codex_plugin_profile_write_failed".to_string())?;
     let parent_metadata = fs::symlink_metadata(parent)
         .map_err(|_| "codex_plugin_profile_write_failed".to_string())?;
-    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+    if parent_metadata.file_type().is_symlink()
+        || !parent_metadata.is_dir()
+        || windows_path_is_reparse_point(parent)
+    {
         return Err("codex_plugin_profile_write_failed".to_string());
     }
     if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || windows_path_is_reparse_point(path)
+        {
             return Err("codex_plugin_profile_write_failed".to_string());
         }
     }
@@ -400,6 +425,7 @@ fn write_managed_profile(path: &Path, value: &str) -> Result<(), String> {
         #[cfg(not(windows))]
         fs::rename(&temporary, path)
             .map_err(|_| "codex_plugin_profile_write_failed".to_string())?;
+        #[cfg(unix)]
         File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|_| "codex_plugin_profile_write_failed".to_string())?;
@@ -418,7 +444,11 @@ fn write_managed_profile(path: &Path, value: &str) -> Result<(), String> {
 
 fn delete_managed_profile(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || windows_path_is_reparse_point(path) =>
+        {
             Err("codex_plugin_profile_delete_failed".to_string())
         }
         Ok(_) => {
