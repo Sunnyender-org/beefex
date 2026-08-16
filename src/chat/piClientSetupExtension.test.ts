@@ -17,6 +17,14 @@ describe('Pi BeefAPI client setup extension', () => {
     expect(result.content[0].text).toContain('grok')
   })
 
+  it('normalizes Pi default sentinels to the account default', async () => {
+    let tool: any
+    registerBeefexClientSetup({ registerTool: (definition: any) => { tool = definition } } as any)
+    const input = vi.fn().mockResolvedValue(JSON.stringify({ ok: true, configured: ['codex'] }))
+    await tool.execute('call-default', { codexModel: ':default' }, undefined, undefined, { ui: { input } })
+    expect(input).toHaveBeenCalledWith('__BEEFEX_MANAGED_CLIENTS_APPLY__', JSON.stringify({ codexModel: null }))
+  })
+
   it('preserves a structured parent failure', async () => {
     let tool: any
     registerBeefexClientSetup({ registerTool: (definition: any) => { tool = definition } } as any)

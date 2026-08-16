@@ -161,22 +161,32 @@ fn parse_version(output: &str) -> Option<(String, u64, u64)> {
     ))
 }
 
+fn codex_version_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/d", "/s", "/c", "codex --version"]);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("codex");
+        command.arg("--version");
+        command
+    }
+}
+
 pub(crate) fn detect_codex() -> CodexDetection {
-    detection_from_output(
-        Command::new("codex")
-            .arg("--version")
-            .output()
-            .map(|output| {
-                (
-                    output.status.success(),
-                    format!(
-                        "{} {}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr)
-                    ),
-                )
-            }),
-    )
+    detection_from_output(codex_version_command().output().map(|output| {
+        (
+            output.status.success(),
+            format!(
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    }))
 }
 
 fn detection_from_output(output: Result<(bool, String), std::io::Error>) -> CodexDetection {
@@ -652,6 +662,17 @@ mod tests {
         assert_eq!(
             format!("{:?}", SecretCredential::new("sk-secret".into())),
             "<redacted>"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_codex_detection_uses_the_cmd_shim() {
+        let command = codex_version_command();
+        assert_eq!(command.get_program(), "cmd.exe");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["/d", "/s", "/c", "codex --version"]
         );
     }
 }

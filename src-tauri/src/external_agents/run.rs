@@ -770,6 +770,9 @@ fn requested_managed_codex_model(placeholder: &str) -> Option<String> {
                 .and_then(|model| model.as_str())
                 .map(str::trim)
                 .filter(|model| !model.is_empty())
+                .filter(|model| {
+                    !matches!(model.to_ascii_lowercase().as_str(), "default" | ":default")
+                })
                 .map(str::to_string)
         })
 }
@@ -1732,6 +1735,14 @@ mod tests {
         );
         assert_eq!(
             requested_managed_codex_model(r#"{"codexModel":"   "}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":":default"}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":"DEFAULT"}"#),
             None
         );
         assert_eq!(
