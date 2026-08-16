@@ -471,13 +471,51 @@ fn restore_snapshot(path: &Path, snapshot: Option<&[u8]>, private: bool) -> Resu
 }
 
 fn command_detected(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
+    #[cfg(windows)]
+    let mut version = {
+        let mut command_line = Command::new("cmd.exe");
+        command_line.args(["/d", "/s", "/c"]);
+        command_line.arg(format!("{command} --version"));
+        command_line
+    };
+    #[cfg(not(windows))]
+    let mut version = {
+        let mut command_line = Command::new(command);
+        command_line.arg("--version");
+        command_line
+    };
+    if version
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+    {
+        return true;
+    }
+
+    #[cfg(windows)]
+    if let Ok(home) = home_dir() {
+        if let Some(path) = windows_client_fallback(&home, command) {
+            return Command::new(path)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn windows_client_fallback(home: &Path, command: &str) -> Option<PathBuf> {
+    match command {
+        "claude" => Some(home.join(".local/bin/claude.exe")),
+        "grok" => Some(home.join(".grok/bin/grok.exe")),
+        _ => None,
+    }
 }
 
 fn inspect_with(paths: &ManagedPaths) -> Result<ManagedClientsStatus, String> {
@@ -773,6 +811,21 @@ mod tests {
             grok: root.join(".grok/config.toml"),
             image2_cli: root.join(".codex/skills/beefapi-image2/scripts/beefapi-image2.mjs"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_client_fallbacks_use_standard_installer_paths() {
+        let home = Path::new(r"C:\Users\Ender");
+        assert_eq!(
+            windows_client_fallback(home, "claude").unwrap(),
+            home.join(".local/bin/claude.exe")
+        );
+        assert_eq!(
+            windows_client_fallback(home, "grok").unwrap(),
+            home.join(".grok/bin/grok.exe")
+        );
+        assert!(windows_client_fallback(home, "node").is_none());
     }
 
     #[test]
