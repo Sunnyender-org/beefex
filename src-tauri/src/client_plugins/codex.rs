@@ -805,8 +805,10 @@ fn verify_with(paths: &CodexPluginPaths) -> Result<CodexPluginOperationReceipt, 
     })
 }
 
-fn rollback_with(paths: &CodexPluginPaths) -> Result<CodexPluginOperationReceipt, String> {
-    let detection = detect_codex();
+fn rollback_with(
+    paths: &CodexPluginPaths,
+    detection: CodexDetection,
+) -> Result<CodexPluginOperationReceipt, String> {
     if let Some(profile) = read_profile(paths)? {
         parse_owned_profile(&profile)?;
     }
@@ -903,7 +905,7 @@ pub fn codex_plugin_verify() -> Result<CodexPluginOperationReceipt, String> {
 
 #[tauri::command]
 pub fn codex_plugin_rollback() -> Result<CodexPluginOperationReceipt, String> {
-    rollback_with(&resolve_paths()?)
+    rollback_with(&resolve_paths()?, detect_codex())
 }
 
 #[cfg(test)]
@@ -998,7 +1000,7 @@ mod tests {
         );
         assert!(paths.backup.exists());
 
-        let restored = rollback_with(&paths).unwrap();
+        let restored = rollback_with(&paths, supported()).unwrap();
         assert_eq!(restored.status.state, "configured");
         assert_eq!(
             restored.status.configured_model.as_deref(),
@@ -1013,7 +1015,7 @@ mod tests {
             "separate-token-one"
         );
 
-        let removed = rollback_with(&paths).unwrap();
+        let removed = rollback_with(&paths, supported()).unwrap();
         assert_eq!(removed.status.state, "ready");
         assert!(!paths.profile.exists());
         assert!(!paths.credential.exists());
