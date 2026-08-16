@@ -161,19 +161,24 @@ fn parse_version(output: &str) -> Option<(String, u64, u64)> {
     ))
 }
 
-fn codex_version_command() -> Command {
+fn codex_command(args: &[&str]) -> Command {
     #[cfg(windows)]
     {
         let mut command = Command::new("cmd.exe");
-        command.args(["/d", "/s", "/c", "codex --version"]);
+        command.args(["/d", "/s", "/c"]);
+        command.arg(format!("codex {}", args.join(" ")));
         command
     }
     #[cfg(not(windows))]
     {
         let mut command = Command::new("codex");
-        command.arg("--version");
+        command.args(args);
         command
     }
+}
+
+fn codex_version_command() -> Command {
+    codex_command(&["--version"])
 }
 
 pub(crate) fn detect_codex() -> CodexDetection {
@@ -542,9 +547,7 @@ pub fn codex_plugin_verify() -> Result<CodexPluginOperationReceipt, String> {
             .reason
             .unwrap_or_else(|| "codex_plugin_not_configured".into()));
     }
-    let output = Command::new("codex")
-        .arg("--strict-config")
-        .arg("--version")
+    let output = codex_command(&["--strict-config", "--version"])
         .output()
         .map_err(|_| "codex_plugin_doctor_failed".to_string())?;
     if !output.status.success() {
@@ -673,6 +676,17 @@ mod tests {
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["/d", "/s", "/c", "codex --version"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_codex_verify_uses_the_cmd_shim() {
+        let command = codex_command(&["--strict-config", "--version"]);
+        assert_eq!(command.get_program(), "cmd.exe");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["/d", "/s", "/c", "codex --strict-config --version"]
         );
     }
 }
