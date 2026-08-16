@@ -1,15 +1,50 @@
 import { spawn } from 'node:child_process'
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const pi = join(repo, 'node_modules', '.bin', 'pi')
+const pi = process.env.BEEFEX_PI_BIN || (process.platform === 'win32'
+  ? join(repo, 'src-tauri', 'resources', 'pi', 'bin', 'pi.exe')
+  : join(repo, 'node_modules', '.bin', 'pi'))
 const policy = join(repo, 'src-tauri', 'resources', 'pi', 'beefex-policy-extension.ts')
 const fixture = join(repo, 'src-tauri', 'tests', 'fixtures', 'pi-approval-extension.mjs')
 const promotionProvider = join(repo, 'src-tauri', 'tests', 'fixtures', 'pi-promotion-provider.mjs')
+
+function piEnvironment(agentDir, sessionDir) {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'
+  const env = {
+    PATH: [
+      dirname(process.execPath),
+      join(repo, 'node_modules', '.bin'),
+      ...(process.platform === 'win32'
+        ? [join(systemRoot, 'System32'), systemRoot]
+        : ['/usr/bin', '/bin']),
+    ].join(delimiter),
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_CODING_AGENT_SESSION_DIR: sessionDir,
+    PI_SKIP_VERSION_CHECK: '1',
+    PI_TELEMETRY: '0',
+  }
+  if (process.platform === 'win32') {
+    Object.assign(env, {
+      SystemRoot: systemRoot,
+      WINDIR: systemRoot,
+      ComSpec: process.env.ComSpec || join(systemRoot, 'System32', 'cmd.exe'),
+      PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD',
+      TEMP: tmpdir(),
+      TMP: tmpdir(),
+    })
+    for (const key of ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432']) {
+      if (process.env[key]) env[key] = process.env[key]
+    }
+  } else {
+    env.TMPDIR = tmpdir()
+  }
+  return env
+}
 
 async function runFixture(approved) {
   const root = await mkdtemp(join(tmpdir(), 'beefex-pi-rpc-'))
@@ -28,14 +63,7 @@ async function runFixture(approved) {
     ],
     {
       cwd: repo,
-      env: {
-        PATH: `${dirname(process.execPath)}:${join(repo, 'node_modules', '.bin')}:/usr/bin:/bin`,
-        TMPDIR: tmpdir(),
-        PI_CODING_AGENT_DIR: agentDir,
-        PI_CODING_AGENT_SESSION_DIR: sessionDir,
-        PI_SKIP_VERSION_CHECK: '1',
-        PI_TELEMETRY: '0',
-      },
+      env: piEnvironment(agentDir, sessionDir),
       stdio: ['pipe', 'pipe', 'pipe'],
     },
   )
@@ -103,14 +131,7 @@ async function runPromotionFixture() {
     ],
     {
       cwd: root,
-      env: {
-        PATH: `${dirname(process.execPath)}:${join(repo, 'node_modules', '.bin')}:/usr/bin:/bin`,
-        TMPDIR: tmpdir(),
-        PI_CODING_AGENT_DIR: agentDir,
-        PI_CODING_AGENT_SESSION_DIR: sessionDir,
-        PI_SKIP_VERSION_CHECK: '1',
-        PI_TELEMETRY: '0',
-      },
+      env: piEnvironment(agentDir, sessionDir),
       stdio: ['pipe', 'pipe', 'pipe'],
     },
   )
@@ -193,14 +214,7 @@ async function resumePromotionFixture(root, agentDir, sessionDir, previousState)
     ],
     {
       cwd: root,
-      env: {
-        PATH: `${dirname(process.execPath)}:${join(repo, 'node_modules', '.bin')}:/usr/bin:/bin`,
-        TMPDIR: tmpdir(),
-        PI_CODING_AGENT_DIR: agentDir,
-        PI_CODING_AGENT_SESSION_DIR: sessionDir,
-        PI_SKIP_VERSION_CHECK: '1',
-        PI_TELEMETRY: '0',
-      },
+      env: piEnvironment(agentDir, sessionDir),
       stdio: ['pipe', 'pipe', 'pipe'],
     },
   )

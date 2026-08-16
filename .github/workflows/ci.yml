@@ -7,9 +7,9 @@ on:
       - main
 
 jobs:
-  quality:
-    # macOS arm64 is the current supported development target. The public workflow
-    # runs checks only; it does not deploy, sign, notarize, or publish binaries.
+  quality-macos:
+    # The public workflow runs checks only; it does not deploy, sign, notarize,
+    # or publish binaries.
     runs-on: macos-latest
 
     steps:
@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
 
       - name: Install frontend dependencies
@@ -43,3 +43,64 @@ jobs:
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  quality-windows:
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm run test
+
+      - name: Build Windows sidecar stub
+        run: npm run build:swift
+
+      - name: Build and verify bundled Pi
+        shell: pwsh
+        run: |
+          npm run build:pi-runtime
+          $version = & .\src-tauri\resources\pi\bin\pi.exe --version
+          if ($version.Trim() -ne '0.84.1') {
+            throw "unexpected bundled Pi version: $version"
+          }
+
+      - name: Rust tests
+        shell: pwsh
+        run: ./scripts/win-cargo-test.ps1
+
+      - name: Build unsigned NSIS acceptance package
+        run: npm run tauri -- build --bundles nsis --no-sign --ci
+
+      - name: Retain unsigned NSIS acceptance artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: beefex-windows-x64-unsigned-${{ github.sha }}
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7

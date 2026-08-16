@@ -32,7 +32,6 @@
     "active": true,
     "targets": [
       "dmg",
-      "msi",
       "nsis"
     ],
     "externalBin": [
@@ -45,9 +44,6 @@
       "resources/pi": "pi"
     },
     "windows": {
-      "wix": {
-        "version": "0.1.0"
-      },
       "nsis": {
         "installerIcon": "icons/icon.ico"
       }

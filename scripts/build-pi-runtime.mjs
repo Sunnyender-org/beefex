@@ -18,10 +18,11 @@ const scriptDir = dirname(fileURLToPath(import.meta.url))
 const repo = resolve(scriptDir, '..')
 const piPackage = resolve(repo, 'node_modules/@earendil-works/pi-coding-agent')
 const outputDir = resolve(repo, 'src-tauri/resources/pi/bin')
-const outputBinary = resolve(outputDir, 'pi')
+const supportedPlatforms = new Set(['darwin', 'win32'])
+const outputBinary = resolve(outputDir, process.platform === 'win32' ? 'pi.exe' : 'pi')
 
-if (process.platform !== 'darwin') {
-  console.log('[build-pi-runtime] skipped: roadmap v1.2 targets macOS only')
+if (!supportedPlatforms.has(process.platform)) {
+  console.log(`[build-pi-runtime] skipped: unsupported platform ${process.platform}`)
   process.exit(0)
 }
 
@@ -32,7 +33,7 @@ if (packageJson.version !== '0.84.1') {
   )
 }
 
-const userBun = join(homedir(), '.bun/bin/bun')
+const userBun = join(homedir(), '.bun/bin', process.platform === 'win32' ? 'bun.exe' : 'bun')
 const bun = process.env.BUN_BIN || (existsSync(userBun) ? userBun : 'bun')
 
 rmSync(outputDir, { recursive: true, force: true })
@@ -79,7 +80,9 @@ copyFileSync(
   resolve(piPackage, 'node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm'),
   resolve(outputDir, 'photon_rs_bg.wasm'),
 )
-chmodSync(outputBinary, 0o755)
+if (process.platform !== 'win32') {
+  chmodSync(outputBinary, 0o755)
+}
 
 const version = spawnSync(outputBinary, ['--version'], { encoding: 'utf8' })
 if (version.status !== 0 || version.stdout.trim() !== '0.84.1') {

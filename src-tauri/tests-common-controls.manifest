@@ -6,9 +6,11 @@
   (0xC0000139)，cargo test 一条都跑不了。
 
   不能在 build.rs 里用链接参数嵌入：唯一覆盖 lib 单测 harness 的 rustc-link-arg 是全目标级，会同时
-  作用于主程序 bin，与 tauri 已嵌入的资源清单撞车（CVT1100 资源重复 / LNK1123）。
-  改用「外部清单」：Windows 对无嵌入清单的 exe 会读取同名 <exe>.manifest。scripts/win-cargo-test.ps1
-  构建测试二进制后把本文件复制到每个测试 exe 旁，即可让加载器绑定到 Common-Controls v6。
+  作用于主程序 bin，与 tauri 已嵌入的资源清单撞车（CVT1100 资源重复 / LNK1123）。Windows 也会
+  优先使用 Rust test harness 已带的内嵌清单，旁置同名外部清单不会补上 v6 依赖。
+
+  scripts/win-cargo-test.ps1 因此先构建 test harness，再用 Windows SDK mt.exe 只给 beefex-* 测试
+  二进制合并本清单。应用主程序仍由 Tauri 自己管理资源和清单。
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>

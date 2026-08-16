@@ -131,7 +131,7 @@ pub fn enrich_path_macos() {
 ///
 /// Order: existing `PATH` first (preserves current resolution order), then any
 /// login-shell additions, then defaults for entries neither source provided.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn merge_paths_unix(current: &str, login: Option<&str>, defaults: &[String]) -> String {
     let mut seen: HashSet<String> = HashSet::new();
     let mut merged: Vec<String> = Vec::new();
@@ -151,7 +151,7 @@ fn merge_paths_unix(current: &str, login: Option<&str>, defaults: &[String]) -> 
 /// `home`; if `home` is `None`/empty those entries are simply skipped. Takes
 /// `home` as a parameter (rather than reading `$HOME`) so it is testable
 /// without env mutation.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn common_dirs_macos(home: Option<std::path::PathBuf>) -> Vec<String> {
     let mut dirs = vec![
         "/opt/homebrew/bin".to_string(),
@@ -601,6 +601,7 @@ fn read_registry_path(system: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use std::path::PathBuf;
 
     #[test]
@@ -616,6 +617,7 @@ mod tests {
         assert_eq!(out, vec!["/a".to_string(), "/b".to_string()]);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn common_dirs_macos_includes_homebrew() {
         let dirs = common_dirs_macos(None);
@@ -623,6 +625,7 @@ mod tests {
         assert!(dirs.iter().any(|d| d == "/usr/local/bin"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn common_dirs_macos_expands_home() {
         let dirs = common_dirs_macos(Some(PathBuf::from("/Users/tester")));
@@ -631,6 +634,7 @@ mod tests {
         assert!(dirs.iter().any(|d| d == "/Users/tester/.bun/bin"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn common_dirs_macos_skips_empty_home() {
         let dirs = common_dirs_macos(Some(PathBuf::from("")));
@@ -640,6 +644,7 @@ mod tests {
     /// Simulate the minimal Finder/Dock PATH and confirm merging folds in the
     /// common install dirs without dropping the originals, deduped + in order.
     /// Pure (no env mutation) so it can't pollute sibling tests.
+    #[cfg(target_os = "macos")]
     #[test]
     fn merge_unix_from_minimal_path_adds_common_dirs() {
         let current = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -665,6 +670,7 @@ mod tests {
 
     /// Login-shell PATH entries are merged after the current PATH but before
     /// defaults, and overlap is deduped.
+    #[cfg(target_os = "macos")]
     #[test]
     fn merge_unix_includes_login_shell_path() {
         let current = "/usr/bin:/bin";

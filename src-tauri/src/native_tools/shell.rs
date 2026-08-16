@@ -1418,6 +1418,107 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    fn windows_pid_is_alive(pid: u32) -> bool {
+        use windows::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+
+        unsafe {
+            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return false;
+            };
+            let mut exit_code = 0u32;
+            let alive = GetExitCodeProcess(process, &mut exit_code).is_ok()
+                && exit_code == STILL_ACTIVE.0 as u32;
+            let _ = CloseHandle(process);
+            alive
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn wait_until_windows_pid_dead(pid: u32, attempts: usize) -> bool {
+        for _ in 0..attempts {
+            if !windows_pid_is_alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Windows cancellation must walk the whole descendant tree. This uses the
+    /// same `taskkill /T /F` production helper against a fresh process group and
+    /// proves that both the PowerShell parent and its sleeper child terminate.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_kill_process_group_terminates_descendant_tree() {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+
+        let root = std::env::temp_dir().join(format!(
+            "beefex-windows-process-tree-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("child.pid");
+        let script = root.join("spawn-tree.ps1");
+        std::fs::write(
+            &script,
+            format!(
+                "$child = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru\nSet-Content -LiteralPath '{}' -Value $child.Id -NoNewline\nWait-Process -Id $child.Id\n",
+                pid_file.to_string_lossy().replace('\'', "''")
+            ),
+        )
+        .unwrap();
+
+        let mut parent = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script)
+            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .unwrap();
+        let parent_pid = parent.id();
+
+        let mut child_pid = None;
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(&pid_file) {
+                child_pid = value.trim().parse::<u32>().ok();
+                if child_pid.is_some() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let child_pid = child_pid.expect("PowerShell child pid receipt");
+        assert!(windows_pid_is_alive(parent_pid));
+        assert!(windows_pid_is_alive(child_pid));
+
+        kill_process_group(parent_pid);
+        assert!(
+            wait_until_windows_pid_dead(child_pid, 100).await,
+            "taskkill /T must terminate descendant pid {child_pid}"
+        );
+        assert!(
+            wait_until_windows_pid_dead(parent_pid, 100).await,
+            "taskkill /T must terminate parent pid {parent_pid}"
+        );
+        let _ = parent.wait();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The whole process GROUP must die, not just the leader. The `sh -c` leader
     /// is spawned in its own session (setsid), and it backgrounds a grandchild
     /// `sleep`. `kill_background` SIGKILLs the group (`kill(-pgid)`), so the

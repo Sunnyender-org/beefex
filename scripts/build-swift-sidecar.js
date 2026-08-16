@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // 构建 Swift sidecar 二进制：
 //   - beefex-ocr-helper: Apple Vision OCR。
-//   - 非 macOS(Windows/Linux): 写空 stub 占位,让 Tauri 的 externalBin 文件存在校验通过。
-//     运行时对应 client 会按平台直接禁用,不会 spawn 这些 stub。
+//   - Windows: 编译一个有效的 fail-closed PE stub,让 Tauri 的 externalBin 文件存在校验通过。
+//     运行时对应 client 会按平台直接禁用；即使误调用也会明确返回 unsupported,而不是打包 0 字节 .exe。
+//   - 其他非 macOS 平台: 保留空 stub 仅供未维护的编译目标通过 Tauri 校验。
 //     这是 Tauri externalBin 的设计限制——配置是全平台的,无法仅 macOS 启用。
 // dev 可用 `|| true` 兜底；正式 build 必须让必需 helper 构建失败直接中止。
 
-import { execSync } from 'node:child_process'
+import { execFileSync, execSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const BIN_DIR = resolve(ROOT, 'src-tauri/binaries')
+const WINDOWS_STUB_SOURCE = resolve(ROOT, 'src-tauri/windows/unsupported-ocr-sidecar.rs')
 const HELPERS = [
   {
     name: 'beefex-ocr-helper',
@@ -60,8 +62,24 @@ function ensureStub(name) {
   }
 }
 
+function buildWindowsStub(name) {
+  const dest = resolve(BIN_DIR, makeDestName(name))
+  execFileSync('rustc', [WINDOWS_STUB_SOURCE, '-O', '-C', 'strip=symbols', '-o', dest], {
+    stdio: 'inherit',
+  })
+  const probe = spawnSync(dest, [], { encoding: 'utf8', windowsHide: true })
+  if (probe.status !== 78 || !probe.stderr.includes('unavailable on Windows')) {
+    console.error(`[build-swift-sidecar] Windows fail-closed stub 校验失败: status=${probe.status} stderr=${probe.stderr}`)
+    process.exit(1)
+  }
+  console.log(`[build-swift-sidecar] 有效 Windows fail-closed stub → ${dest}`)
+}
+
 if (process.platform !== 'darwin') {
-  for (const helper of HELPERS) ensureStub(helper.name)
+  for (const helper of HELPERS) {
+    if (process.platform === 'win32') buildWindowsStub(helper.name)
+    else ensureStub(helper.name)
+  }
   process.exit(0)
 }
 
