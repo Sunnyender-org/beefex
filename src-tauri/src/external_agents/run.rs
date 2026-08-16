@@ -309,6 +309,9 @@ pub async fn run_external_cli_reply(
         let provider_extension = resolve_pi_managed_provider_extension(app)?;
         args.push("--extension".to_string());
         args.push(provider_extension.to_string_lossy().to_string());
+        let client_setup_extension = resolve_pi_client_setup_extension(app)?;
+        args.push("--extension".to_string());
+        args.push(client_setup_extension.to_string_lossy().to_string());
     }
 
     let extra_env = if def.stream_format == StreamFormat::PiRpc {
@@ -767,6 +770,31 @@ async fn handle_pi_extension_ui(
     generation: u64,
     request: PiExtensionUiRequest,
 ) -> PiExtensionUiDecision {
+    if request.method == "input" && request.title == "__BEEFEX_MANAGED_CLIENTS_APPLY__" {
+        let requested_model = serde_json::from_str::<serde_json::Value>(&request.placeholder)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("codexModel")
+                    .and_then(|model| model.as_str())
+                    .map(str::to_string)
+            });
+        let model = requested_model.or_else(|| state.beefapi_account.state().default_model);
+        let result = match model {
+            Some(model) => {
+                crate::client_plugins::managed::apply_from_state(app, state, model).await
+            }
+            None => Err("managed_clients_default_model_unavailable".to_string()),
+        };
+        let payload = match result {
+            Ok(receipt) => serde_json::json!({
+                "ok": true,
+                "configured": receipt.status.clients.into_iter().filter(|client| client.configured).map(|client| client.id).collect::<Vec<_>>()
+            }),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+        };
+        return PiExtensionUiDecision::Value(payload.to_string());
+    }
     // Pi's RPC dialog id is the stable approval identity. Never guess a selection or
     // auto-confirm: unsupported dialogs fail closed, while confirmations reuse the one
     // AppState approval store and the existing renderer command.
@@ -867,6 +895,23 @@ fn resolve_pi_managed_provider_extension(app: &AppHandle) -> Result<std::path::P
             "Pi managed provider extension is missing; refusing to expose managed credentials"
                 .to_string()
         })
+}
+
+fn resolve_pi_client_setup_extension(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let file_name = "beefex-client-setup-extension.ts";
+    let bundled = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|root| root.join("pi").join(file_name));
+    let development = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("pi")
+        .join(file_name);
+    bundled
+        .filter(|path| path.is_file())
+        .or_else(|| development.is_file().then_some(development))
+        .ok_or_else(|| "Pi BeefAPI client setup extension is missing".to_string())
 }
 
 #[derive(Default)]

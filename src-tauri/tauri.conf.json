@@ -41,7 +41,8 @@
       "../LICENSE": "LICENSE",
       "../NOTICE": "NOTICE",
       "resources/skills": "skills",
-      "resources/pi": "pi"
+      "resources/pi": "pi",
+      "resources/client-plugins": "client-plugins"
     },
     "windows": {
       "nsis": {

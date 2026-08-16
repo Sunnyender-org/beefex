@@ -19,8 +19,8 @@ use super::{
         EphemeralModelProvider,
     },
     types::{
-        AccountPhase, AccountState, AuthStartResponse, DiscoveryResponse, ManagedCredential,
-        PollResponse, SafeAccountMetadata,
+        AccountPhase, AccountState, AuthStartResponse, DiscoveryResponse, ManagedClientCredentials,
+        ManagedCredential, PollResponse, SafeAccountMetadata,
     },
 };
 
@@ -50,6 +50,13 @@ pub(crate) trait AccountTransport: Send + Sync {
         credential: &'a SecretCredential,
         base_url: &'a str,
     ) -> TransportFuture<'a, ()>;
+    fn ensure_client_credentials<'a>(
+        &'a self,
+        _credential: &'a SecretCredential,
+        _base_url: &'a str,
+    ) -> TransportFuture<'a, ManagedClientCredentials> {
+        Box::pin(async { Err("managed_client_credentials_unavailable".to_string()) })
+    }
 }
 
 pub(crate) trait AccountMetadataStore: Send + Sync {
@@ -271,6 +278,31 @@ impl AccountService {
         self.publish(AccountState::signed_in(&validated), &on_state);
         hydrate_managed_provider(&validated, &managed.credential, requested_model)
             .map_err(str::to_string)
+    }
+
+    pub(crate) async fn ensure_client_credentials(
+        &self,
+    ) -> Result<ManagedClientCredentials, String> {
+        if !matches!(
+            self.state().phase,
+            AccountPhase::SignedIn | AccountPhase::Offline
+        ) {
+            return Err("reauthorization_required".to_string());
+        }
+        let metadata = self
+            .metadata_load()
+            .await?
+            .ok_or_else(|| "reauthorization_required".to_string())?;
+        let credential = self
+            .credential_read()
+            .await?
+            .ok_or_else(|| "reauthorization_required".to_string())?;
+        if metadata.base_url != self.transport.trusted_base_url() {
+            return Err("reauthorization_required".to_string());
+        }
+        self.transport
+            .ensure_client_credentials(&credential, &metadata.base_url)
+            .await
     }
 
     pub(crate) async fn logout(&self, on_state: impl Fn(AccountState)) -> AccountState {

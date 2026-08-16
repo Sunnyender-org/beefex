@@ -1532,6 +1532,27 @@ export type CodexPluginOperationReceipt = {
   doctorSummary?: string
 }
 
+export type ManagedClientItem = {
+  id: 'codex' | 'image2' | 'claude-code' | 'claude-desktop' | 'grok'
+  detected: boolean
+  configured: boolean
+  launchCommand: string
+  reason?: string
+}
+
+export type ManagedClientsStatus = {
+  state: 'ready' | 'partial' | 'configured'
+  clients: ManagedClientItem[]
+  reason?: string
+}
+
+export type ManagedClientsReceipt = {
+  operation: 'apply' | 'verify' | 'rollback'
+  status: ManagedClientsStatus
+  changedPaths: string[]
+  checks: string[]
+}
+
 export type RendererDiagnosticInput = {
   transition: 'window_error' | 'unhandled_rejection'
   errorClass: string
@@ -1597,10 +1618,15 @@ export const api = {
   codexPluginInspect: () => invoke<CodexPluginStatus>('codex_plugin_inspect'),
   codexPluginPreview: (model: string) =>
     invoke<CodexPluginPreview>('codex_plugin_preview', { model }),
-  codexPluginApply: (model: string, credential: string) =>
-    invoke<CodexPluginOperationReceipt>('codex_plugin_apply', { model, credential }),
+  codexPluginApply: (model: string) =>
+    invoke<CodexPluginOperationReceipt>('codex_plugin_apply', { model }),
   codexPluginVerify: () => invoke<CodexPluginOperationReceipt>('codex_plugin_verify'),
   codexPluginRollback: () => invoke<CodexPluginOperationReceipt>('codex_plugin_rollback'),
+  managedClientsInspect: () => invoke<ManagedClientsStatus>('managed_clients_inspect'),
+  managedClientsApply: (model: string) =>
+    invoke<ManagedClientsReceipt>('managed_clients_apply', { model }),
+  managedClientsVerify: () => invoke<ManagedClientsReceipt>('managed_clients_verify'),
+  managedClientsRollback: () => invoke<ManagedClientsReceipt>('managed_clients_rollback'),
 
   // 设置相关
   getSettings: async () => normalizeSettings(await invoke<Settings>('get_settings')),
