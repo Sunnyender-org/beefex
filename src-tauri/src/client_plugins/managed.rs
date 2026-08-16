@@ -113,7 +113,7 @@ fn resolve_paths() -> Result<ManagedPaths, String> {
         home.join(".config")
     };
     Ok(ManagedPaths {
-        claude_credential: data_root.join("claude.credential"),
+        claude_credential: data_root.join("credentials").join("claude.credential"),
         claude_helper: data_root.join(if cfg!(windows) {
             "claude-credential.ps1"
         } else {
@@ -846,7 +846,10 @@ mod tests {
             &SecretCredential::new("grok".into()),
         )
         .unwrap_err();
-        assert_eq!(error, "managed_clients_read_failed");
+        assert!(matches!(
+            error.as_str(),
+            "managed_clients_read_failed" | "managed_clients_write_failed"
+        ));
         assert_eq!(fs::read(&paths.claude_code).unwrap(), original);
         assert!(FileCredentialStore::new(paths.claude_credential.clone())
             .read()

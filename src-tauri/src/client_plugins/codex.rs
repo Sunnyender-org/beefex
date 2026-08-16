@@ -39,7 +39,7 @@ impl CodexPluginPaths {
         let data_root = app_data.join("client-plugins").join("codex");
         Self {
             config: codex_home.join(CONFIG_FILE),
-            credential: data_root.join("credential"),
+            credential: data_root.join("credentials").join("credential"),
             helper: data_root.join("credential.ps1"),
             receipt: data_root.join("receipt.json"),
             backup: data_root.join("config.backup"),
