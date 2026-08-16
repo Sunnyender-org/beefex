@@ -761,6 +761,19 @@ pub async fn run_external_cli_reply(
     })
 }
 
+fn requested_managed_codex_model(placeholder: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(placeholder)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("codexModel")
+                .and_then(|model| model.as_str())
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+        })
+}
+
 async fn handle_pi_extension_ui(
     app: &AppHandle,
     state: &AppState,
@@ -771,14 +784,7 @@ async fn handle_pi_extension_ui(
     request: PiExtensionUiRequest,
 ) -> PiExtensionUiDecision {
     if request.method == "input" && request.title == "__BEEFEX_MANAGED_CLIENTS_APPLY__" {
-        let requested_model = serde_json::from_str::<serde_json::Value>(&request.placeholder)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("codexModel")
-                    .and_then(|model| model.as_str())
-                    .map(str::to_string)
-            });
+        let requested_model = requested_managed_codex_model(&request.placeholder);
         let model = requested_model.or_else(|| state.beefapi_account.state().default_model);
         let result = match model {
             Some(model) => {
@@ -1716,6 +1722,23 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_client_setup_uses_default_for_missing_or_blank_model() {
+        assert_eq!(requested_managed_codex_model("{}"), None);
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":null}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":"   "}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":" gpt-5.6-sol "}"#),
+            Some("gpt-5.6-sol".to_string())
+        );
+    }
 
     #[test]
     fn managed_pi_runtime_isolates_global_home_skills() {

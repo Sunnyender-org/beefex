@@ -7,6 +7,10 @@ describe('Pi BeefAPI client setup extension', () => {
     let tool: any
     registerBeefexClientSetup({ registerTool: (definition: any) => { tool = definition } } as any)
     expect(tool.name).toBe('configure_beefapi_clients')
+    expect(tool.parameters.properties.codexModel.description).toContain('not a group name')
+    expect(tool.parameters.properties.codexModel.minLength).toBe(1)
+    expect(tool.promptGuidelines.join(' ')).toContain('Never pass gpt-pro')
+    expect(tool.promptGuidelines.join(' ')).toContain('Omit codexModel')
     const input = vi.fn().mockResolvedValue(JSON.stringify({ ok: true, configured: ['codex', 'image2', 'claude-code', 'claude-desktop', 'grok'] }))
     const result = await tool.execute('call-1', {}, undefined, undefined, { ui: { input } })
     expect(input).toHaveBeenCalledWith('__BEEFEX_MANAGED_CLIENTS_APPLY__', JSON.stringify({ codexModel: null }))

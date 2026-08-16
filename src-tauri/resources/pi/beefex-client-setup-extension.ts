@@ -11,12 +11,14 @@ export default function registerBeefexClientSetup(pi: ExtensionApi) {
     promptSnippet: "Configure supported local coding clients to use BeefAPI",
     promptGuidelines: [
       "Use configure_beefapi_clients when the user explicitly asks Beefex to configure Codex, Image2, Claude Code, Claude Desktop, or Grok for BeefAPI.",
+      "BeefAPI groups are fixed server-side. Never pass gpt-pro, claude max, grok, or any group name as codexModel.",
+      "codexModel is only for a concrete Codex model id such as gpt-5.6-sol. Omit codexModel when the user did not explicitly choose a concrete model id so Beefex uses the current account default.",
     ],
     parameters: {
       type: "object",
       "~kind": "Object",
       properties: {
-        codexModel: { type: "string", "~kind": "String", "~optional": true, description: "Optional BeefAPI-allowed Codex model; omit to use the account default." },
+        codexModel: { type: "string", "~kind": "String", "~optional": true, minLength: 1, description: "Optional concrete BeefAPI-allowed Codex model id, for example gpt-5.6-sol. This is not a group name. Omit to use the current account default." },
       },
       additionalProperties: false,
     },
