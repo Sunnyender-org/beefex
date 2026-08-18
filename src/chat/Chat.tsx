@@ -6,7 +6,6 @@ import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { PiProjectTrustDialog } from './PiProjectTrustDialog'
 import { ScopedApprovalDialog } from './ScopedApprovalDialog'
 import { PiTaskMenu } from './PiTaskMenu'
-import { ManagedModelSelector } from './ManagedModelSelector'
 import { resolveManagedModelValue } from './managedModelPolicy'
 import type { PiRpcCommand } from './piCapabilities'
 import type { AssistantStreamStats } from './MessageList'
@@ -60,6 +59,7 @@ import { OnboardingShell } from '../onboarding/OnboardingShell'
 import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
 import type { Lang } from '../settings/i18n'
 import { estimateTokens } from '../utils/tokens'
+import { StatusTag } from '../bflabs/vendor/src/components/StatusTag'
 import {
   CHAT_MIN_SIZE_COLLAPSED,
   CHAT_MIN_SIZE_EXPANDED,
@@ -3332,7 +3332,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   return (
     <div
-      className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
+      className={`bf-theme chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
     >
       {!usesNativeTitlebar && <WindowControls />}
       <div className="flex h-full min-h-0 w-full">
@@ -3434,11 +3434,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                   <span>{uiLang === 'en' ? 'WORKSPACE' : '工作区'}</span>
                   <strong>{selectedProject?.name || (uiLang === 'en' ? 'No project' : '未选择项目')}</strong>
                 </div>
-                <ManagedModelSelector
-                  models={managedAllowedModels}
-                  value={activeModel}
-                  onChange={(model) => void handleModelChange('beefapi-managed', model)}
-                />
                 <div className="shrink-0" data-tauri-drag-region="false">
                   <BackgroundJobsIndicator />
                 </div>
@@ -3462,18 +3457,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
                 <div className="flex min-h-0 flex-1 flex-col">
                   {showEmptyHero ? (
-                    <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-6 pb-12">
-                  <div className="chat-empty-hero-stack chat-motion-fade-up relative z-10 w-full max-w-3xl space-y-5">
+                    <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-3 pb-12">
+                  <div className="chat-empty-hero-stack chat-motion-fade-up relative z-10 w-full max-w-6xl space-y-5">
                     <div className="text-center">
-                      <span className="beef-eyebrow">
+                      <StatusTag className="beef-empty-task-tag" tone="accent" showDot={false}>
                         {uiLang === 'en' ? 'NEW CODING TASK' : '新建 CODING TASK'}
-                      </span>
+                      </StatusTag>
                     <h2
                       className="chat-empty-hero-title mt-3 text-center text-[1.25rem] font-semibold leading-snug tracking-[-0.012em] text-neutral-900 dark:text-[var(--beef-text)] sm:text-[1.4rem]"
                     >
                       {currentAssistantSnapshot?.name
                         || selectedProject?.name
-                        || (uiLang === 'en' ? 'Open a project and describe the change' : '打开项目，然后描述要修改的内容')}
+                        || (uiLang === 'en' ? 'Create anything with Beefex' : '在 Beefex 上创造一切')}
                     </h2>
                       <p className="mx-auto mt-2 max-w-xl text-[12px] leading-6 text-neutral-500 dark:text-[#FFEEDA]/55">
                         {selectedProject
@@ -3527,6 +3522,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       onToggleWebSearch={handleToggleWebSearch}
                       replyModels={activeReplyModels}
                       onChangeReplyModels={undefined}
+                      managedModels={managedAllowedModels}
+                      managedModel={activeModel}
+                      onManagedModelChange={(model) => void handleModelChange('beefapi-managed', model)}
                       contextSlot={
                         <ContextIndicator
                           contextState={contextState}
@@ -3632,6 +3630,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     onToggleWebSearch={handleToggleWebSearch}
                     replyModels={activeReplyModels}
                     onChangeReplyModels={undefined}
+                    managedModels={managedAllowedModels}
+                    managedModel={activeModel}
+                    onManagedModelChange={(model) => void handleModelChange('beefapi-managed', model)}
                     contextSlot={
                       <ContextIndicator
                         contextState={contextState}

@@ -15,6 +15,8 @@ describe('ScopedApprovalDialog', () => {
     )
 
     expect(screen.getByRole('dialog', { name: '允许运行终端命令？' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '拒绝' })).toHaveAttribute('data-slot', 'button')
+    expect(screen.getByRole('button', { name: '允许' })).toHaveAttribute('data-slot', 'button')
     await waitFor(() => expect(screen.getByRole('button', { name: '拒绝', hidden: false })).toHaveFocus())
   })
 

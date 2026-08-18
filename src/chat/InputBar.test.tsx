@@ -4,6 +4,27 @@ import { describe, expect, it, vi } from 'vitest'
 import { InputBar } from './InputBar'
 
 describe('InputBar', () => {
+  it('keeps the managed model selector inside the composer', () => {
+    const onManagedModelChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        managedModels={['gpt-5.6-sol', 'claude-fable-5']}
+        managedModel="gpt-5.6-sol"
+        onManagedModelChange={onManagedModelChange}
+      />,
+    )
+
+    const selector = screen.getByRole('button', { name: 'BeefAPI 模型' })
+    expect(screen.getByRole('textbox')).toHaveAttribute('rows', '2')
+    expect(screen.getByRole('textbox')).toHaveClass('min-h-[52px]')
+    expect(selector.closest('[data-chat-composer="true"]')).not.toBeNull()
+    fireEvent.click(selector)
+    expect(screen.getByText('BeefAPI 可用模型').parentElement).toHaveClass('bottom-9')
+    fireEvent.click(screen.getByRole('button', { name: '选择模型 claude-fable-5' }))
+    expect(onManagedModelChange).toHaveBeenCalledWith('claude-fable-5')
+  })
+
   it('allows only one send submission while the current submission is pending', async () => {
     let finishFirst: (() => void) | undefined
     const first = new Promise<void>((resolve) => {

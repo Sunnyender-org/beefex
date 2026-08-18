@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/Sunnyender-org/bflabs-ui",
+    "commit": "54997785cc4076a5e23f4cd31732065945442cad",
+    "packageRoot": "packages/ui"
+  },
+  "files": {
+    "LICENSE": "b2e8847ec30f96a402cf8faeef7600d7633c607da3e6fe95fb0738c8da59acf9",
+    "UPSTREAM.json": "9a37cc2666ac22fa7d689b71169d25ce4c6e243c50abd249ed2eb9d2433e51a3",
+    "package.json": "dcad9ba27cc44f5a3922da4e36d7bc0e7964f2203a966cf69fe48c9ceeccb37b",
+    "src/assets/bf-mark.svg": "0753d579f77453cac5d28a58f94b2a4f98dde4e2e945a13273653065cb7bb708",
+    "src/components/AgentMessage.tsx": "db8e63870894d47f2068dfe690d485e27dcc586daf7cbccded2a9e89f95cf6cd",
+    "src/components/BFTheme.tsx": "aa059103f2e6727cfa7fa8088ff52946c4cbe8d5593f4d240dfd890953aec3d7",
+    "src/components/Brand.tsx": "8c511722bc2a13eb60ed6955b3614df8891b545806763989faea33b29d088da0",
+    "src/components/Button.test.tsx": "86906ad657c73e2cc79f5673777fb9b3e695c4f91679524455401817f538edac",
+    "src/components/Button.tsx": "b4339945f1b25e67262c0e4ffa96defff4f25e37e927352e8c3df26e5e452932",
+    "src/components/Card.tsx": "c4b75926caf8e71abf50d205a65a9a23caaeaee713a89e43af8e9af9c4ac7918",
+    "src/components/ConfirmationCard.tsx": "3fba1a06ff9138e044ab45d633c70afd44afca84f9630a0b4b79d5d71e16fe62",
+    "src/components/KineticHeading.tsx": "78138b4994c1d77b2c46860eddbe5e63187ce8fc39dcd631dfd45de1d5f85ca1",
+    "src/components/Notice.tsx": "bc28bcbec0e1fbeae084a092163ddca9334fb2a5bac93fdf0171f136750bb67f",
+    "src/components/ProcessSteps.tsx": "e1a7f66034ac3f9a2ba271c587b2e4d39447609e38a7ee7c299aed45f2753f6b",
+    "src/components/Progress.test.tsx": "81ab0480cfcf5e5f452dd8d5968d5e975a3074f493d45eb8d46fcd33861f923e",
+    "src/components/Progress.tsx": "9dbaccf813f98df4c3b7307cf8dbf85d490bfb2d67d38c928077ee605fea1e40",
+    "src/components/PromptComposer.tsx": "6b813d8c8af9e8064b4e517a67535db1cb59f878aa392d4d2a5e71176f7ec37f",
+    "src/components/PromptSuggestions.tsx": "0bc2cbcda4141d797ff835e541d9a533b3efe321ce6d08aed9a79253346a8b05",
+    "src/components/Reveal.tsx": "61ced06897ed024b500c9bc782f98cba26dd66c4496294791cb426bc3ed7fba8",
+    "src/components/SectionHeading.tsx": "35d8886975a7c512b29b2dc26cd8b63df3530208b0049debdd59511d25c9b3c0",
+    "src/components/StatusTag.tsx": "bbd7b95dd958323036feec974396b5630c7b55304376c2fc3f4d4a251ae865a3",
+    "src/components/Tabs.tsx": "925c4824ee6bb18602f8329507d4e6a3138959c00adb5f15f975f43df007f7a9",
+    "src/components/icons.tsx": "7ac11167a562fbb19f2d1657892c2cf031f5287c42aa164173e93fd0af02f830",
+    "src/index.ts": "1b83446de9620e95a2da07410512d0023f0d349e3c2f4894fff7fddd74a46cb6",
+    "src/lib/cx.ts": "d30c59949b6d1bc3583c9235ffd488beb5e7c532672a44f33cf3ac8afd18bf0b",
+    "src/styles/base.css": "f32340bf8b5056b32cd7f9ec05787896550c8d8cd129e4ad320485d1d43faaac",
+    "src/styles/components.css": "604de3c08415e1722898f4cbda5dc243f1e36a0bf6d614fa367e6971dcc5ddb7",
+    "src/styles/index.css": "63a0156c3e6e1274cd566b07bca5d77b4d6197e75373c58d61e7d51705ee2028",
+    "src/styles/tokens.css": "cdecaf2cfa905fafb706019c6a10f268d0dd7f9a034e45978ca0400954a79be2",
+    "src/vite-env.d.ts": "bf144e3cdae616e27b064c8c2b94b14525e220fb3facc4cb4884d21b65eb5aa5"
+  }
+}
