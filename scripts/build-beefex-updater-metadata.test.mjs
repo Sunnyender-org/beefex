@@ -23,11 +23,11 @@ assert.throws(() => parseSha256sums('not-a-hash  beefex-desktop-mac-arm64.dmg'),
 assert.throws(() => parseSha256sums('9887c1dddc735d39bd064473316ab4cb7cd6fe7ad4ccb3170025ba14c488b1c9'), /malformed SHA line/)
 
 const document = buildUpdaterDocument({
-  version: '0.1.0-alpha.5',
+  version: '0.1.0-alpha.6',
   checksums,
 })
-assert.equal(document.version, '0.1.0-alpha.5')
-assert.equal(document.tag, 'v0.1.0-alpha.5')
+assert.equal(document.version, '0.1.0-alpha.6')
+assert.equal(document.tag, 'v0.1.0-alpha.6')
 assert.equal(document.source_commit, '')
 
 console.log('build-beefex-updater-metadata.selftest.ok')

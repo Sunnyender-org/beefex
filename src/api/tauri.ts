@@ -1149,9 +1149,9 @@ export type UpdateInfo = {
   updatesDisabled?: boolean
   /** true = 检查本身失败，并非"已是最新"。 */
   checkFailed?: boolean
-  /** 最新版本号（剥掉 v 前缀，如 "0.1.0-alpha.5"） */
+  /** 最新版本号（剥掉 v 前缀，如 "0.1.0-alpha.6"） */
   version?: string
-  /** 发布 tag（含 v 前缀，如 "v0.1.0-alpha.5"） */
+  /** 发布 tag（含 v 前缀，如 "v0.1.0-alpha.6"） */
   tag?: string
   /** 下载页或 release 页面 */
   htmlUrl?: string
