@@ -1,7 +1,7 @@
 # Beefex Rust backend
 [package]
 name = "beefex"
-version = "0.1.0"
+version = "0.1.0-alpha.5"
 description = "Beefex - BeefAPI login-first coding agent desktop"
 authors = ["ZM", "BeefAPI Contributors"]
 license = "GPL-3.0-or-later"

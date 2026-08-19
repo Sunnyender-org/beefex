@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use url::Url;
 
@@ -72,11 +72,13 @@ pub(crate) fn validate_discovery(
     if discovery.default_model != REQUIRED_DEFAULT_MODEL {
         return Err("default_model_unavailable");
     }
-    if !discovery
+    let enabled_groups: HashSet<&str> = discovery
         .groups
         .iter()
-        .any(|group| group.id == REQUIRED_GROUP && group.enabled)
-    {
+        .filter(|group| group.enabled && !group.id.trim().is_empty())
+        .map(|group| group.id.as_str())
+        .collect();
+    if !enabled_groups.contains(REQUIRED_GROUP) {
         return Err("unsupported_token_group");
     }
     if !discovery.models.iter().any(|model| {
@@ -86,30 +88,56 @@ pub(crate) fn validate_discovery(
     }) {
         return Err("default_model_unavailable");
     }
+    let mut allowed_models = Vec::new();
+    let mut model_groups = BTreeMap::new();
+    for model in &discovery.models {
+        if !model.available {
+            continue;
+        }
+        let Some(group) = select_routing_group(&model.groups, &enabled_groups) else {
+            continue;
+        };
+        if !allowed_models.iter().any(|id| id == &model.id) {
+            allowed_models.push(model.id.clone());
+        }
+        model_groups.insert(model.id.clone(), group);
+    }
     Ok(SafeAccountMetadata {
         email: credential.user_email.clone(),
         group: credential.group.clone(),
         default_model: discovery.default_model.clone(),
-        allowed_models: discovery
-            .models
-            .iter()
-            .filter(|model| {
-                model.available && model.groups.iter().any(|group| group == REQUIRED_GROUP)
-            })
-            .map(|model| model.id.clone())
-            .collect(),
+        allowed_models,
+        model_groups,
         key_name: credential.key_name.clone(),
         base_url: credential.base_url.clone(),
     })
 }
 
+fn select_routing_group(model_groups: &[String], enabled_groups: &HashSet<&str>) -> Option<String> {
+    if model_groups
+        .iter()
+        .any(|group| group == REQUIRED_GROUP && enabled_groups.contains(REQUIRED_GROUP))
+    {
+        return Some(REQUIRED_GROUP.to_string());
+    }
+    model_groups
+        .iter()
+        .find(|group| enabled_groups.contains(group.as_str()))
+        .cloned()
+}
+
 pub(crate) struct EphemeralModelProvider {
     inner: ModelProvider,
+    routing_group: String,
 }
 
 impl EphemeralModelProvider {
     pub(crate) fn model(&self) -> Option<&str> {
         self.inner.enabled_models.first().map(String::as_str)
+    }
+
+    pub(crate) fn routing_group(&self) -> &str {
+        &self.routing_group
     }
 
     pub(crate) fn into_inner(self) -> ModelProvider {
@@ -124,6 +152,7 @@ impl std::fmt::Debug for EphemeralModelProvider {
             .field("id", &self.inner.id)
             .field("base_url", &self.inner.base_url)
             .field("models", &self.inner.enabled_models)
+            .field("routing_group", &self.routing_group)
             .field("credential", &"<redacted>")
             .finish()
     }
@@ -144,6 +173,7 @@ pub(crate) fn hydrate_managed_provider(
         return Err("model_not_allowed");
     }
     Ok(EphemeralModelProvider {
+        routing_group: metadata.routing_group_for(selected).to_string(),
         inner: ModelProvider {
             id: MANAGED_PROVIDER_ID.to_string(),
             name: "BeefAPI".to_string(),
@@ -196,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_projects_only_available_models_for_the_required_group() {
+    fn discovery_projects_all_available_models_from_enabled_groups() {
         let credential = ManagedCredential::fixture(
             "secret",
             PRODUCTION_BASE_URL,
@@ -207,12 +237,21 @@ mod tests {
         let mut discovery = DiscoveryResponse::fixture(
             REQUIRED_GROUP,
             REQUIRED_DEFAULT_MODEL,
-            &[REQUIRED_DEFAULT_MODEL, "claude-opus-4.8", "disabled-model"],
+            &[REQUIRED_DEFAULT_MODEL, "gpt-5.5", "disabled-model"],
         );
+        discovery.groups.push(super::super::types::DiscoveryGroup {
+            id: "claude max".to_string(),
+            enabled: true,
+        });
         discovery.models[2].available = false;
         discovery.models.push(super::super::types::DiscoveryModel {
-            id: "wrong-group".to_string(),
-            groups: vec!["other".to_string()],
+            id: "claude-fable-5".to_string(),
+            groups: vec!["claude max".to_string()],
+            available: true,
+        });
+        discovery.models.push(super::super::types::DiscoveryModel {
+            id: "studio-secret".to_string(),
+            groups: vec!["studio".to_string()],
             available: true,
         });
         let metadata = validate_discovery(&credential, &discovery).unwrap();
@@ -220,9 +259,55 @@ mod tests {
             metadata.allowed_models,
             vec![
                 REQUIRED_DEFAULT_MODEL.to_string(),
-                "claude-opus-4.8".to_string()
+                "gpt-5.5".to_string(),
+                "claude-fable-5".to_string()
             ]
         );
+        assert_eq!(
+            metadata
+                .model_groups
+                .get("claude-fable-5")
+                .map(String::as_str),
+            Some("claude max")
+        );
+        assert_eq!(
+            metadata
+                .model_groups
+                .get(REQUIRED_DEFAULT_MODEL)
+                .map(String::as_str),
+            Some(REQUIRED_GROUP)
+        );
+        assert!(!metadata
+            .allowed_models
+            .iter()
+            .any(|model| model == "studio-secret"));
+    }
+
+    #[test]
+    fn routing_prefers_required_group_when_a_model_is_in_multiple_groups() {
+        let credential = ManagedCredential::fixture(
+            "secret",
+            PRODUCTION_BASE_URL,
+            "ender@example.com",
+            "Beefex",
+            REQUIRED_GROUP,
+        );
+        let mut discovery = DiscoveryResponse::fixture(
+            REQUIRED_GROUP,
+            REQUIRED_DEFAULT_MODEL,
+            &[REQUIRED_DEFAULT_MODEL],
+        );
+        discovery.groups.push(super::super::types::DiscoveryGroup {
+            id: "gpt-plus".to_string(),
+            enabled: true,
+        });
+        discovery.models.push(super::super::types::DiscoveryModel {
+            id: "gpt-5.5".to_string(),
+            groups: vec!["gpt-plus".to_string(), REQUIRED_GROUP.to_string()],
+            available: true,
+        });
+        let metadata = validate_discovery(&credential, &discovery).unwrap();
+        assert_eq!(metadata.routing_group_for("gpt-5.5"), REQUIRED_GROUP);
     }
 
     #[test]
@@ -232,6 +317,7 @@ mod tests {
             group: REQUIRED_GROUP.to_string(),
             default_model: REQUIRED_DEFAULT_MODEL.to_string(),
             allowed_models: vec![REQUIRED_DEFAULT_MODEL.to_string()],
+            model_groups: BTreeMap::new(),
             key_name: "Beefex".to_string(),
             base_url: PRODUCTION_BASE_URL.to_string(),
         };
@@ -251,6 +337,7 @@ mod tests {
             group: REQUIRED_GROUP.to_string(),
             default_model: REQUIRED_DEFAULT_MODEL.to_string(),
             allowed_models: vec![REQUIRED_DEFAULT_MODEL.to_string()],
+            model_groups: BTreeMap::new(),
             key_name: "Beefex".to_string(),
             base_url: PRODUCTION_BASE_URL.to_string(),
         };
@@ -267,6 +354,32 @@ mod tests {
     }
 
     #[test]
+    fn hydration_uses_the_selected_model_routing_group() {
+        let mut model_groups = BTreeMap::new();
+        model_groups.insert("claude-fable-5".to_string(), "claude max".to_string());
+        let metadata = SafeAccountMetadata {
+            email: "ender@example.com".to_string(),
+            group: REQUIRED_GROUP.to_string(),
+            default_model: REQUIRED_DEFAULT_MODEL.to_string(),
+            allowed_models: vec![
+                REQUIRED_DEFAULT_MODEL.to_string(),
+                "claude-fable-5".to_string(),
+            ],
+            model_groups,
+            key_name: "Beefex".to_string(),
+            base_url: PRODUCTION_BASE_URL.to_string(),
+        };
+        let provider = hydrate_managed_provider(
+            &metadata,
+            &super::super::credential_store::SecretCredential::new("secret".to_string()),
+            Some("claude-fable-5"),
+        )
+        .unwrap();
+        assert_eq!(provider.model(), Some("claude-fable-5"));
+        assert_eq!(provider.routing_group(), "claude max");
+    }
+
+    #[test]
     fn managed_model_is_default_only_after_verified_account_metadata_exists() {
         assert_eq!(
             managed_model_selection(&AccountState::signed_out(None)),
@@ -277,6 +390,7 @@ mod tests {
             group: REQUIRED_GROUP.to_string(),
             default_model: REQUIRED_DEFAULT_MODEL.to_string(),
             allowed_models: vec![REQUIRED_DEFAULT_MODEL.to_string()],
+            model_groups: BTreeMap::new(),
             key_name: "Beefex".to_string(),
             base_url: PRODUCTION_BASE_URL.to_string(),
         });

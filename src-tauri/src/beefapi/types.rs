@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::credential_store::SecretCredential;
@@ -117,8 +119,20 @@ pub(crate) struct SafeAccountMetadata {
     pub default_model: String,
     #[serde(default)]
     pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub model_groups: BTreeMap<String, String>,
     pub key_name: String,
     pub base_url: String,
+}
+
+impl SafeAccountMetadata {
+    pub(crate) fn routing_group_for(&self, model: &str) -> &str {
+        self.model_groups
+            .get(model)
+            .map(String::as_str)
+            .filter(|group| !group.is_empty())
+            .unwrap_or(self.group.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

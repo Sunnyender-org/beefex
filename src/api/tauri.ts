@@ -1142,24 +1142,26 @@ export type RequestDebugRecord = {
   }
 }
 
-/** 更新检查结果（来自后端 GitHub Releases API 调用） */
+/** 更新检查结果。主通道是 R2 Beefex updater 合同，回退到 GitHub artifact + R2 SHA256SUMS。 */
 export type UpdateInfo = {
   available: boolean
-  /** true = this build has no configured Beefex release channel. */
+  /** true = this platform has no Beefex Alpha installer. */
   updatesDisabled?: boolean
-  /** true = 检查本身失败（网络 / api.github.com 被墙 / 限流），并非"已是最新"。前端据此区分展示。 */
+  /** true = 检查本身失败，并非"已是最新"。 */
   checkFailed?: boolean
-  /** true = 走了 github.com atom 回退通道（api.github.com 不通时）。仅诊断用。 */
-  viaFallback?: boolean
-  /** 最新版本号（剥掉 v 前缀的 semver，如 "2.5.0"） */
+  /** 最新版本号（剥掉 v 前缀，如 "0.1.0-alpha.5"） */
   version?: string
-  /** GitHub release tag (含 v 前缀，如 "v2.5.0") */
+  /** 发布 tag（含 v 前缀，如 "v0.1.0-alpha.5"） */
   tag?: string
-  /** GH release 页面 URL，用于"去 GitHub 下载"按钮 */
+  /** 下载页或 release 页面 */
   htmlUrl?: string
   /** Release notes / changelog (markdown) */
   body?: string
   publishedAt?: string
+  sha256?: string
+  assetName?: string
+  source?: string
+  commit?: string
 }
 
 /** RapidOCR 模型档位:'standard' = PP-OCRv5 mobile(默认,快),'high' = PP-OCRv6 medium(高精度)。 */
@@ -1981,16 +1983,18 @@ export const api = {
   // 取走 Rust 端在 lens_request_internal 中抓到的选中文本（take 一次清一次）
   takeLensSelection: () => invoke<string>('take_lens_selection'),
 
-  // ========== 自动更新（仅检查 + 跳转，不做自动下载安装） ==========
+  // ========== 自动更新：R2 latest 对象 + SHA-256，安装不碰用户数据 ==========
 
-  /** 调后端 GitHub Releases API 检查最新版本 */
+  /** 检查当前 Alpha 线是否有更新 */
   checkUpdate: () => invoke<UpdateInfo>('check_github_latest_release'),
 
   /** 下载新版本安装包到 OS temp 目录，返回本地文件路径。下载进度通过 onUpdateDownloadProgress 派发 */
-  downloadUpdate: (version: string) => invoke<string>('download_update_asset', { version }),
+  downloadUpdate: (version: string, sha256?: string) =>
+    invoke<string>('download_update_asset', { version, sha256 }),
 
   /** 启动安装包并退出当前应用（macOS：cp 新 .app 到 /Applications + open；Windows：spawn NSIS installer） */
-  installUpdate: (path: string) => invoke<void>('install_update_and_quit', { path }),
+  installUpdate: (path: string, version?: string) =>
+    invoke<void>('install_update_and_quit', { path, version }),
 
   /** 下载进度事件：每次百分比变化派发一次 */
   onUpdateDownloadProgress: (

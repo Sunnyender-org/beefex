@@ -938,7 +938,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       unlisten = await api.onUpdateDownloadProgress((p) => {
         setDownloadPercent(Math.max(0, Math.min(100, Math.round(p.percent))))
       })
-      const path = await api.downloadUpdate(updateInfo.version)
+      const path = await api.downloadUpdate(updateInfo.version, updateInfo.sha256)
       setDownloadedPath(path)
       setDownloadState('downloaded')
     } catch (err) {
@@ -950,17 +950,17 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     }
   }, [updateInfo])
 
-  /** 启动 installer 并退出当前应用。Rust 端会在 macOS 上 cp 新 .app + open,在 Windows spawn NSIS exe */
+  /** 启动 installer 并退出当前应用。macOS 走暂存校验后的 rename 交换；Windows spawn NSIS。 */
   const handleInstall = useCallback(async () => {
     if (!downloadedPath) return
     try {
-      await api.installUpdate(downloadedPath)
+      await api.installUpdate(downloadedPath, updateInfo?.version)
     } catch (err) {
       console.error('Install update failed:', err)
       setDownloadError(typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err)))
       setDownloadState('failed')
     }
-  }, [downloadedPath])
+  }, [downloadedPath, updateInfo?.version])
 
   /** 拉一次 RapidOCR 状态(app data 里 dylib + 模型 4 个文件齐不齐)。
    *  挂载时 + 切换到 RapidOCR 引擎时调一下。 */
@@ -4584,6 +4584,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 </SettingsGroup>
 
                 <SettingsGroup title={t.checkUpdate}>
+                  <div className="kv-panel info mb-2">
+                    <div className="kv-panel-body">{t.updateBootstrapNote}</div>
+                  </div>
                   <SettingRow label={t.autoCheckUpdate}>
                     <Toggle
                       checked={settings?.autoCheckUpdate ?? false}
