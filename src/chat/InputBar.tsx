@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -29,6 +29,7 @@ import { ChatAttachments } from './ChatAttachments'
 import { SourcesButton } from './SourcesButton'
 import { AssistantPicker } from './AssistantPicker'
 import { MultiModelSelector } from './MultiModelSelector'
+import { ManagedModelSelector } from './ManagedModelSelector'
 import { Button, IconButton } from '../components/Button'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
@@ -359,7 +360,12 @@ function readFileAsBase64(file: File): Promise<string> {
 }
 
 interface InputBarProps {
-  onSend: (content: string, attachments: PendingAttachment[]) => void
+  onSend: (
+    content: string,
+    attachments: PendingAttachment[],
+  ) => boolean | void | Promise<boolean | void>
+  /** Shared by the welcome and conversation composers so a route-driven remount cannot resubmit one physical action. */
+  submissionLockRef?: MutableRefObject<boolean>
   disabled?: boolean
   onCancel?: () => void
   cancelVisible?: boolean
@@ -410,12 +416,17 @@ interface InputBarProps {
   /** 多答模型集（会话级 reply_models / replyModels；0/1 个=单模型，≥2=一问多答） */
   replyModels?: ModelRef[]
   onChangeReplyModels?: (models: ModelRef[]) => void | Promise<void>
+  /** BeefAPI 管理模型只在 composer 内选择，避免工作区标题栏承载发送参数。 */
+  managedModels?: readonly string[]
+  managedModel?: string
+  onManagedModelChange?: (model: string) => void | Promise<void>
   /** 上下文用量指示器：由 Chat 注入 <ContextIndicator>，渲染在底栏右侧 Act 左边 */
   contextSlot?: ReactNode
 }
 
 export function InputBar({
   onSend,
+  submissionLockRef,
   disabled,
   onCancel,
   cancelVisible,
@@ -455,6 +466,9 @@ export function InputBar({
   onToggleWebSearch,
   replyModels = [],
   onChangeReplyModels,
+  managedModels = [],
+  managedModel = '',
+  onManagedModelChange,
   contextSlot,
 }: InputBarProps) {
   const [input, setInput] = useState('')
@@ -468,6 +482,8 @@ export function InputBar({
   const [projectOptionsLoading, setProjectOptionsLoading] = useState(false)
   const [projectOptionsError, setProjectOptionsError] = useState('')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
+  const localSubmissionLockRef = useRef(false)
+  const sendSubmissionInFlightRef = submissionLockRef ?? localSubmissionLockRef
   const [projectCreating, setProjectCreating] = useState(false)
   const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false)
   const [slashPanelOpen, setSlashPanelOpen] = useState(false)
@@ -480,8 +496,6 @@ export function InputBar({
   const innerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const agentPlanMode = agentPlanState?.mode ?? 'act'
-  const agentPlanActive = agentPlanMode === 'plan'
-  const agentOrchestrateActive = agentPlanMode === 'orchestrate'
   const projectEntryEnabled = Boolean(showProjectEntry && onSelectProject)
   // 项目按钮的显示态：优先导航选中的项目；否则回退到当前会话自身的项目（有名才算），
   // 这样从「最近」打开一条属于项目的对话时，按钮仍能显示该项目。
@@ -921,10 +935,16 @@ export function InputBar({
     updateTextareaHeight,
   ])
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmed = input.trim()
-    if ((!trimmed && attachments.length === 0) || disabled || sendDisabledReason) return
-    onSend(trimmed, attachments)
+    if (
+      sendSubmissionInFlightRef.current
+      || (!trimmed && attachments.length === 0)
+      || disabled
+      || sendDisabledReason
+    ) return
+    sendSubmissionInFlightRef.current = true
+    const submittedAttachments = attachments
     setInput('')
     setAttachments([])
     setAttachmentError('')
@@ -934,6 +954,11 @@ export function InputBar({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
       textareaRef.current.style.overflowY = 'hidden'
+    }
+    try {
+      await onSend(trimmed, submittedAttachments)
+    } finally {
+      sendSubmissionInFlightRef.current = false
     }
   }
 
@@ -990,7 +1015,7 @@ export function InputBar({
 
     if (e.key !== 'Enter' || e.shiftKey) return
     e.preventDefault()
-    handleSend()
+    void handleSend()
   }
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1299,9 +1324,9 @@ export function InputBar({
   const wrapperClass =
     layout === 'inline'
       ? 'w-full'
-      : 'chat-composer-footer shrink-0 px-6 pb-8 pt-2'
+      : 'chat-composer-footer shrink-0 px-3 pb-8 pt-2'
 
-  const innerClass = layout === 'inline' ? 'w-full' : 'mx-auto w-full max-w-4xl'
+  const innerClass = layout === 'inline' ? 'w-full' : 'mx-auto w-full max-w-6xl'
   const slashPanelPlacementClass = layout === 'inline'
     ? 'top-full mt-1'
     : 'bottom-full mb-1'
@@ -1569,11 +1594,7 @@ export function InputBar({
           className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-[4px] border px-3 py-2.5 transition-[box-shadow,border-color] duration-200 ${
             dragActive
               ? 'border-[var(--beef-active)] shadow-[0_2px_12px_rgba(0,0,0,0.06)] ring-2 ring-[var(--accent-soft)] dark:border-[var(--beef-active)] dark:shadow-none'
-              : agentPlanActive
-                ? 'border-[var(--beef-active)] shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_10px_-4px_rgba(0,0,0,0.06),0_12px_32px_-14px_rgba(0,0,0,0.14)] focus-within:border-[var(--beef-active)] focus-within:shadow-[0_1px_3px_rgba(0,0,0,0.05),0_6px_14px_-6px_rgba(0,0,0,0.07),0_18px_44px_-16px_rgba(226,106,62,0.2)] dark:border-[var(--beef-active)] dark:shadow-none dark:focus-within:border-[var(--beef-active)]'
-                : agentOrchestrateActive
-                  ? 'border-[var(--beef-active)] shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_10px_-4px_rgba(0,0,0,0.06),0_12px_32px_-14px_rgba(0,0,0,0.14)] focus-within:border-[var(--beef-active)] focus-within:shadow-[0_1px_3px_rgba(0,0,0,0.05),0_6px_14px_-6px_rgba(0,0,0,0.07),0_18px_44px_-16px_rgba(226,106,62,0.2)] dark:border-[var(--beef-active)] dark:shadow-none dark:focus-within:border-[var(--beef-active)]'
-                  : 'border-[var(--beef-border)] shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_10px_-4px_rgba(0,0,0,0.06),0_12px_32px_-14px_rgba(0,0,0,0.14)] focus-within:border-[var(--beef-active)] focus-within:shadow-[0_1px_3px_rgba(0,0,0,0.05),0_6px_14px_-6px_rgba(0,0,0,0.07),0_18px_44px_-16px_rgba(226,106,62,0.16)] dark:border-[var(--beef-border)] dark:shadow-none dark:focus-within:border-[var(--beef-active)]'
+              : 'border-[var(--beef-border)] shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_10px_-4px_rgba(0,0,0,0.06),0_12px_32px_-14px_rgba(0,0,0,0.14)] focus-within:border-[var(--border-strong)] focus-within:shadow-[0_1px_3px_rgba(0,0,0,0.05),0_6px_14px_-6px_rgba(0,0,0,0.07),0_18px_44px_-16px_rgba(0,0,0,0.13)] dark:border-[var(--beef-border)] dark:shadow-none dark:focus-within:border-[var(--border-strong)]'
           }`}
         >
           {dragActive && (
@@ -1612,8 +1633,8 @@ export function InputBar({
                 ? `${cliAgentLabel} 命令，输入 / 补全`
                 : '描述要修改的代码，输入 / 使用命令'
             }
-            rows={1}
-            className="block max-h-40 min-h-[28px] w-full select-text resize-none overflow-y-hidden border-0 bg-transparent px-1 py-1.5 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
+            rows={2}
+            className="block max-h-40 min-h-[52px] w-full select-text resize-none overflow-y-hidden border-0 bg-transparent px-1 py-1.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus-visible:outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
           />
           <div className="mt-1.5 flex items-center gap-1">
             <IconButton
@@ -1667,6 +1688,16 @@ export function InputBar({
                   <FolderPlus size={18} strokeWidth={1.75} />
                 )}
               </IconButton>
+            )}
+            {onManagedModelChange && (
+              <div className="min-w-0 shrink" data-tauri-drag-region="false">
+                <ManagedModelSelector
+                  models={managedModels}
+                  value={managedModel}
+                  onChange={(model) => void onManagedModelChange(model)}
+                  placement="up"
+                />
+              </div>
             )}
             {showAssistantEntry && onOpenAssistantCenter && (
               <AssistantPicker
@@ -1780,7 +1811,7 @@ export function InputBar({
             <div className="relative h-9 w-9 shrink-0">
               <button
                 type="button"
-                onClick={handleSend}
+                onClick={() => void handleSend()}
                 disabled={!canSend}
                 tabIndex={-1}
                 title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}

@@ -15,6 +15,43 @@ pub struct SpawnedAgent {
     pub resolved_bin: PathBuf,
 }
 
+/// Bun standalone executables on Windows 11 can crash while loading TypeScript extensions when
+/// a Win32 verbatim path (`\\?\C:\...` / `\\?\UNC\...`) crosses the process boundary. Keep the
+/// canonical/verbatim paths inside Beefex for filesystem safety, but present ordinary absolute
+/// Win32 paths to the Pi child. This is a lexical conversion only; it does not resolve symlinks or
+/// change which file the already-validated path names.
+fn normalize_windows_verbatim_path(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn pi_process_boundary_path(path: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        return PathBuf::from(normalize_windows_verbatim_path(&path.to_string_lossy()));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.to_path_buf()
+    }
+}
+
+fn pi_process_boundary_value(value: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        return normalize_windows_verbatim_path(value);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        value.to_string()
+    }
+}
+
 /// Concurrently drain the child's stderr into a JoinHandle so a CLI that reports failures on
 /// stderr doesn't (a) block on a full pipe while we read stdout, and (b) fail silently. Blank
 /// lines are dropped and the buffer is capped at `STDERR_CAP_CHARS` (keeping the tail — the last
@@ -55,6 +92,9 @@ pub async fn resolve_binary(def: &RuntimeAgentDef) -> Option<PathBuf> {
     if def.id == "pi" {
         if let Some(path) = resolve_bundled_pi_binary() {
             return Some(path);
+        }
+        if !cfg!(debug_assertions) {
+            return None;
         }
     }
     for candidate in std::iter::once(def.bin).chain(def.fallback_bins.iter().copied()) {
@@ -97,6 +137,23 @@ fn resolve_bundled_pi_binary() -> Option<PathBuf> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        #[cfg(target_os = "windows")]
+        {
+            let executable = std::env::current_exe().ok()?;
+            let packaged = executable.parent()?.join("pi/bin/pi.exe");
+            if packaged.is_file() {
+                return Some(packaged);
+            }
+
+            if cfg!(debug_assertions) {
+                let development =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/pi/bin/pi.exe");
+                if development.is_file() {
+                    return Some(development);
+                }
+            }
+        }
+
         None
     }
 }
@@ -130,15 +187,33 @@ pub async fn spawn_agent(
     cwd: &Path,
     extra_env: &HashMap<String, String>,
 ) -> Result<SpawnedAgent, String> {
-    let mut command = Command::new(resolved_bin);
+    let process_bin = if def.id == "pi" {
+        pi_process_boundary_path(resolved_bin)
+    } else {
+        resolved_bin.to_path_buf()
+    };
+    let process_cwd = if def.id == "pi" {
+        pi_process_boundary_path(cwd)
+    } else {
+        cwd.to_path_buf()
+    };
+    let process_args = if def.id == "pi" {
+        args.iter()
+            .map(|value| pi_process_boundary_value(value))
+            .collect::<Vec<_>>()
+    } else {
+        args.to_vec()
+    };
+
+    let mut command = Command::new(&process_bin);
     if def.id == "pi" {
         // Managed Pi must never inherit ambient provider credentials. The caller supplies a
         // minimal process environment plus the parent-owned broker/session paths explicitly.
         command.env_clear();
     }
     command
-        .args(args)
-        .current_dir(cwd)
+        .args(&process_args)
+        .current_dir(&process_cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -148,7 +223,11 @@ pub async fn spawn_agent(
         command.env(key, value);
     }
     for (key, value) in extra_env {
-        command.env(key, value);
+        if def.id == "pi" {
+            command.env(key, pi_process_boundary_value(value));
+        } else {
+            command.env(key, value);
+        }
     }
     let child = command
         .spawn()
@@ -157,6 +236,39 @@ pub async fn spawn_agent(
         child,
         resolved_bin: resolved_bin.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod process_boundary_tests {
+    use super::normalize_windows_verbatim_path;
+
+    #[test]
+    fn strips_windows_drive_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_verbatim_path(r"\\?\C:\Beefex\pi\bin\pi.exe"),
+            r"C:\Beefex\pi\bin\pi.exe"
+        );
+    }
+
+    #[test]
+    fn converts_windows_unc_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_verbatim_path(r"\\?\UNC\server\share\pi.exe"),
+            r"\\server\share\pi.exe"
+        );
+    }
+
+    #[test]
+    fn preserves_ordinary_paths_and_non_path_values() {
+        assert_eq!(
+            normalize_windows_verbatim_path(r"C:\Beefex\pi\bin\pi.exe"),
+            r"C:\Beefex\pi\bin\pi.exe"
+        );
+        assert_eq!(
+            normalize_windows_verbatim_path("gpt-5.6-sol"),
+            "gpt-5.6-sol"
+        );
+    }
 }
 
 pub async fn write_prompt_stdin(
@@ -269,6 +381,23 @@ pub fn parse_json_line(line: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn development_pi_resolution_points_to_the_pinned_runtime() {
+        let pi = resolve_bundled_pi_binary().expect("bundled/development Pi runtime");
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            pi.file_name().and_then(|name| name.to_str()),
+            Some("pi.exe")
+        );
+
+        let output = std::process::Command::new(&pi)
+            .arg("--version")
+            .output()
+            .expect("execute resolved Pi runtime");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0.84.1");
+    }
 
     #[test]
     fn stream_json_user_content_uses_string_for_slash_commands() {

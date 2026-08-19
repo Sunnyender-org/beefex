@@ -1,6 +1,8 @@
-// @ts-expect-error The renderer tsconfig intentionally omits Node types; Pi loads this resource in Node.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Node types differ across package hosts.
+// @ts-ignore Pi loads this resource in Node; the renderer graph may omit Node types.
 import { existsSync, realpathSync } from "node:fs"
-// @ts-expect-error The renderer tsconfig intentionally omits Node types; Pi loads this resource in Node.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Node types differ across package hosts.
+// @ts-ignore Pi loads this resource in Node; the renderer graph may omit Node types.
 import { dirname, isAbsolute, relative, resolve } from "node:path"
 
 declare const process: { cwd: () => string }

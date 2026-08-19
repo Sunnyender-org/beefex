@@ -1,4 +1,5 @@
 import { CheckCircle2, FileCode2, SquareTerminal } from 'lucide-react'
+import { StatusTag } from '../bflabs/vendor/src/components/StatusTag'
 import type { ChatCompletionReceipt } from './types'
 
 export function CompletionReceipt({
@@ -16,7 +17,9 @@ export function CompletionReceipt({
     <details className="beef-completion-receipt mx-auto mb-2 w-[min(100%-2rem,52rem)] shrink-0 rounded-[4px] border text-[12px]">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-medium marker:hidden">
         <CheckCircle2 size={14} className="text-[var(--beef-verified)]" />
-        <span>{lang === 'zh' ? '完成回执' : 'Completion receipt'}</span>
+        <StatusTag tone="success" className="beef-completion-receipt__status">
+          {lang === 'zh' ? '完成回执' : 'Completion receipt'}
+        </StatusTag>
         <span className="font-normal text-neutral-400">
           {files.length > 0 && `${files.length} ${lang === 'zh' ? '个文件' : 'files'}`}
           {files.length > 0 && commands.length > 0 && ' · '}

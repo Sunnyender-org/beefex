@@ -2,15 +2,52 @@ import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const pi = join(repo, 'node_modules', '.bin', 'pi')
+const pi = process.env.BEEFEX_PI_BIN || (process.platform === 'win32'
+  ? join(repo, 'src-tauri', 'resources', 'pi', 'bin', 'pi.exe')
+  : join(repo, 'node_modules', '.bin', 'pi'))
 const extension = join(repo, 'src-tauri', 'resources', 'pi', 'beefex-managed-provider-extension.ts')
 const capability = '0123456789abcdef0123456789abcdef'
 const requestPath = `/${capability}/v1/responses`
+
+function piEnvironment(agentDir, sessionDir, brokerUrl) {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'
+  const env = {
+    PATH: [
+      dirname(process.execPath),
+      join(repo, 'node_modules', '.bin'),
+      ...(process.platform === 'win32'
+        ? [join(systemRoot, 'System32'), systemRoot]
+        : ['/usr/bin', '/bin']),
+    ].join(delimiter),
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_CODING_AGENT_SESSION_DIR: sessionDir,
+    PI_SKIP_VERSION_CHECK: '1',
+    PI_TELEMETRY: '0',
+    BEEFEX_PI_BROKER_URL: brokerUrl,
+    BEEFEX_PI_MODEL: 'gpt-5.6-sol',
+  }
+  if (process.platform === 'win32') {
+    Object.assign(env, {
+      SystemRoot: systemRoot,
+      WINDIR: systemRoot,
+      ComSpec: process.env.ComSpec || join(systemRoot, 'System32', 'cmd.exe'),
+      PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD',
+      TEMP: tmpdir(),
+      TMP: tmpdir(),
+    })
+    for (const key of ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432']) {
+      if (process.env[key]) env[key] = process.env[key]
+    }
+  } else {
+    env.TMPDIR = tmpdir()
+  }
+  return env
+}
 
 const root = await mkdtemp(join(tmpdir(), 'beefex-pi-managed-broker-'))
 const observedRequests = []
@@ -54,16 +91,11 @@ async function runPi(sessionFile, prompt) {
   if (sessionFile) args.push('--session', sessionFile)
   const child = spawn(pi, args, {
     cwd: root,
-    env: {
-      PATH: `${dirname(process.execPath)}:${join(repo, 'node_modules', '.bin')}:/usr/bin:/bin`,
-      TMPDIR: tmpdir(),
-      PI_CODING_AGENT_DIR: join(root, 'agent'),
-      PI_CODING_AGENT_SESSION_DIR: join(root, 'sessions'),
-      PI_SKIP_VERSION_CHECK: '1',
-      PI_TELEMETRY: '0',
-      BEEFEX_PI_BROKER_URL: `http://127.0.0.1:${address.port}/${capability}/v1`,
-      BEEFEX_PI_MODEL: 'gpt-5.6-sol',
-    },
+    env: piEnvironment(
+      join(root, 'agent'),
+      join(root, 'sessions'),
+      `http://127.0.0.1:${address.port}/${capability}/v1`,
+    ),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let stdout = ''

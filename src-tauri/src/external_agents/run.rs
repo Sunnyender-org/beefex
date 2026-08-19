@@ -59,7 +59,17 @@ fn managed_pi_runtime_env(
     let agent_dir = runtime_root.join("agent");
     let session_dir = runtime_root.join("sessions");
     let isolated_home = runtime_root.join("home");
-    for directory in [&agent_dir, &session_dir, &isolated_home] {
+    let isolated_temp = runtime_root.join("tmp");
+    let isolated_roaming = isolated_home.join("AppData").join("Roaming");
+    let isolated_local = isolated_home.join("AppData").join("Local");
+    for directory in [
+        &agent_dir,
+        &session_dir,
+        &isolated_home,
+        &isolated_temp,
+        &isolated_roaming,
+        &isolated_local,
+    ] {
         std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
         #[cfg(unix)]
         {
@@ -70,7 +80,18 @@ fn managed_pi_runtime_env(
     }
 
     let mut env = HashMap::new();
-    for key in ["PATH", "TMPDIR", "LANG", "LC_ALL"] {
+    for key in [
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "PATHEXT",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+    ] {
         if let Ok(value) = std::env::var(key) {
             env.insert(key.to_string(), value);
         }
@@ -83,6 +104,33 @@ fn managed_pi_runtime_env(
         "HOME".to_string(),
         isolated_home.to_string_lossy().into_owned(),
     );
+    #[cfg(target_os = "windows")]
+    {
+        env.insert(
+            "USERPROFILE".to_string(),
+            isolated_home.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "APPDATA".to_string(),
+            isolated_roaming.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "LOCALAPPDATA".to_string(),
+            isolated_local.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "TEMP".to_string(),
+            isolated_temp.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "TMP".to_string(),
+            isolated_temp.to_string_lossy().into_owned(),
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(value) = std::env::var("TMPDIR") {
+        env.insert("TMPDIR".to_string(), value);
+    }
     env.insert(
         "PI_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().into_owned(),
@@ -261,6 +309,9 @@ pub async fn run_external_cli_reply(
         let provider_extension = resolve_pi_managed_provider_extension(app)?;
         args.push("--extension".to_string());
         args.push(provider_extension.to_string_lossy().to_string());
+        let client_setup_extension = resolve_pi_client_setup_extension(app)?;
+        args.push("--extension".to_string());
+        args.push(client_setup_extension.to_string_lossy().to_string());
     }
 
     let extra_env = if def.stream_format == StreamFormat::PiRpc {
@@ -710,6 +761,22 @@ pub async fn run_external_cli_reply(
     })
 }
 
+fn requested_managed_codex_model(placeholder: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(placeholder)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("codexModel")
+                .and_then(|model| model.as_str())
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .filter(|model| {
+                    !matches!(model.to_ascii_lowercase().as_str(), "default" | ":default")
+                })
+                .map(str::to_string)
+        })
+}
+
 async fn handle_pi_extension_ui(
     app: &AppHandle,
     state: &AppState,
@@ -719,6 +786,24 @@ async fn handle_pi_extension_ui(
     generation: u64,
     request: PiExtensionUiRequest,
 ) -> PiExtensionUiDecision {
+    if request.method == "input" && request.title == "__BEEFEX_MANAGED_CLIENTS_APPLY__" {
+        let requested_model = requested_managed_codex_model(&request.placeholder);
+        let model = requested_model.or_else(|| state.beefapi_account.state().default_model);
+        let result = match model {
+            Some(model) => {
+                crate::client_plugins::managed::apply_from_state(app, state, model).await
+            }
+            None => Err("managed_clients_default_model_unavailable".to_string()),
+        };
+        let payload = match result {
+            Ok(receipt) => serde_json::json!({
+                "ok": true,
+                "configured": receipt.status.clients.into_iter().filter(|client| client.configured).map(|client| client.id).collect::<Vec<_>>()
+            }),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+        };
+        return PiExtensionUiDecision::Value(payload.to_string());
+    }
     // Pi's RPC dialog id is the stable approval identity. Never guess a selection or
     // auto-confirm: unsupported dialogs fail closed, while confirmations reuse the one
     // AppState approval store and the existing renderer command.
@@ -819,6 +904,23 @@ fn resolve_pi_managed_provider_extension(app: &AppHandle) -> Result<std::path::P
             "Pi managed provider extension is missing; refusing to expose managed credentials"
                 .to_string()
         })
+}
+
+fn resolve_pi_client_setup_extension(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let file_name = "beefex-client-setup-extension.ts";
+    let bundled = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|root| root.join("pi").join(file_name));
+    let development = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("pi")
+        .join(file_name);
+    bundled
+        .filter(|path| path.is_file())
+        .or_else(|| development.is_file().then_some(development))
+        .ok_or_else(|| "Pi BeefAPI client setup extension is missing".to_string())
 }
 
 #[derive(Default)]
@@ -1625,6 +1727,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn managed_client_setup_uses_default_for_missing_or_blank_model() {
+        assert_eq!(requested_managed_codex_model("{}"), None);
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":null}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":"   "}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":":default"}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":"DEFAULT"}"#),
+            None
+        );
+        assert_eq!(
+            requested_managed_codex_model(r#"{"codexModel":" gpt-5.6-sol "}"#),
+            Some("gpt-5.6-sol".to_string())
+        );
+    }
+
+    #[test]
     fn managed_pi_runtime_isolates_global_home_skills() {
         let root =
             std::env::temp_dir().join(format!("beefex-managed-pi-home-{}", uuid::Uuid::new_v4()));
@@ -1638,6 +1765,23 @@ mod tests {
             Some(&root.join("agent").to_string_lossy().into_owned())
         );
         assert!(!root.join("home/.agents/skills").exists());
+
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                env.get("USERPROFILE"),
+                Some(&root.join("home").to_string_lossy().into_owned())
+            );
+            assert_eq!(
+                env.get("TEMP"),
+                Some(&root.join("tmp").to_string_lossy().into_owned())
+            );
+            if let Ok(program_files) = std::env::var("ProgramFiles") {
+                assert_eq!(env.get("ProgramFiles"), Some(&program_files));
+            }
+            assert!(root.join("home/AppData/Roaming").is_dir());
+            assert!(root.join("home/AppData/Local").is_dir());
+        }
 
         #[cfg(unix)]
         {

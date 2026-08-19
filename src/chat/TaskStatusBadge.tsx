@@ -1,4 +1,5 @@
 import type { ChatTaskStatus } from './types'
+import { StatusTag, type StatusTagTone } from '../bflabs/vendor/src/components/StatusTag'
 
 const styles: Record<ChatTaskStatus, string> = {
   idle: 'beef-task-status--idle',
@@ -20,10 +21,22 @@ const labels: Record<ChatTaskStatus, { zh: string; en: string }> = {
   interrupted: { zh: '已中断', en: 'Interrupted' },
 }
 
+const tones: Record<ChatTaskStatus, StatusTagTone> = {
+  idle: 'neutral',
+  running: 'progress',
+  awaiting_approval: 'accent',
+  completed: 'success',
+  failed: 'neutral',
+  cancelled: 'neutral',
+  interrupted: 'accent',
+}
+
 export function TaskStatusBadge({ status, lang }: { status: ChatTaskStatus; lang: 'zh' | 'en' }) {
   return (
-    <div
-      className={`beef-task-status flex h-6 shrink-0 items-center gap-1.5 rounded-[2px] border px-2 text-[10px] font-bold tracking-[0.04em] ${styles[status]}`}
+    <StatusTag
+      className={`beef-task-status shrink-0 border ${styles[status]}`}
+      tone={tones[status]}
+      showDot={false}
       data-task-status={status}
       title={labels[status][lang]}
     >
@@ -32,6 +45,6 @@ export function TaskStatusBadge({ status, lang }: { status: ChatTaskStatus; lang
         aria-hidden="true"
       />
       <span>{labels[status][lang]}</span>
-    </div>
+    </StatusTag>
   )
 }

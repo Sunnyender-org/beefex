@@ -38,6 +38,7 @@ pub struct PiExtensionUiRequest {
     pub method: String,
     pub title: String,
     pub message: String,
+    pub placeholder: String,
     pub options: Vec<String>,
 }
 
@@ -573,6 +574,15 @@ fn parse_extension_ui_request(raw: &Value) -> Option<PiExtensionUiRequest> {
         message: raw
             .get("message")
             .or_else(|| raw.get("params").and_then(|params| params.get("message")))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        placeholder: raw
+            .get("placeholder")
+            .or_else(|| {
+                raw.get("params")
+                    .and_then(|params| params.get("placeholder"))
+            })
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
@@ -1624,6 +1634,22 @@ mod tests {
         assert_eq!(request.method, "confirm");
         assert_eq!(request.title, "Allow bash?");
         assert_eq!(request.message, "npm test");
+        assert!(request.placeholder.is_empty());
+    }
+
+    #[test]
+    fn parses_bounded_client_setup_payload_from_pi_native_input() {
+        let raw = json!({
+            "type": "extension_ui_request",
+            "id": "setup-1",
+            "method": "input",
+            "title": "__BEEFEX_MANAGED_CLIENTS_APPLY__",
+            "placeholder": "{\"codexModel\":\"gpt-5.6-sol\"}"
+        });
+        let request = parse_extension_ui_request(&raw).expect("request");
+        assert_eq!(request.method, "input");
+        assert_eq!(request.title, "__BEEFEX_MANAGED_CLIENTS_APPLY__");
+        assert_eq!(request.placeholder, "{\"codexModel\":\"gpt-5.6-sol\"}");
     }
 
     #[tokio::test]
@@ -1634,6 +1660,7 @@ mod tests {
             method: "confirm".to_string(),
             title: "Allow write?".to_string(),
             message: "src/demo.ts".to_string(),
+            placeholder: String::new(),
             options: Vec::new(),
         };
         reply_extension_ui(

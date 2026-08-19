@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { Wrench, X } from 'lucide-react'
+import { Button } from '../bflabs/vendor/src/components/Button'
 
 interface ScopedApprovalDialogProps {
   title: string
@@ -62,21 +63,23 @@ export function ScopedApprovalDialog({
         </div>
         {preview}
         <div className="flex justify-end gap-2">
-          <button
+          <Button
             ref={rejectRef}
-            type="button"
-            className="rounded-[2px] border border-[var(--beef-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--beef-text)] hover:bg-[var(--beef-raised)]"
+            variant="quiet"
+            size="sm"
+            className="beef-approval-action beef-approval-action--reject"
             onClick={onReject}
           >
             拒绝
-          </button>
-          <button
-            type="button"
-            className="rounded-[2px] bg-[var(--beef-active)] px-3 py-1.5 text-[12px] font-semibold text-[#111417] hover:bg-[var(--beef-pressed)] active:scale-[0.97]"
+          </Button>
+          <Button
+            variant="accent"
+            size="sm"
+            className="beef-approval-action beef-approval-action--approve"
             onClick={onApprove}
           >
             {approveLabel}
-          </button>
+          </Button>
         </div>
       </section>
     </div>

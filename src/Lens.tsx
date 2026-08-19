@@ -244,7 +244,7 @@ export default function Lens() {
   // 否则会被当成有图去读图报错，所以另给一个合成 key 专供历史去重/持久化。
   const historyKeyRef = useRef('')
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const floatingRebaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const floatingRebaseTimerRef = useRef<number | null>(null)
   const focusReqIdRef = useRef(0)
   const motionSeqRef = useRef(0)
   // 只在真正"打开/重入 Lens 会话"（enterSelect）时自增，与动画用的 motionSeqRef 区分开。

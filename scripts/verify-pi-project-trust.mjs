@@ -1,26 +1,59 @@
 import { spawn } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { ProjectTrustStore } from '@earendil-works/pi-coding-agent'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const pi = join(repo, 'src-tauri', 'resources', 'pi', 'bin', 'pi')
+const pi = process.env.BEEFEX_PI_BIN || join(
+  repo,
+  'src-tauri',
+  'resources',
+  'pi',
+  'bin',
+  process.platform === 'win32' ? 'pi.exe' : 'pi',
+)
 const skillName = 'beefex-project-trust-probe'
+
+function piEnvironment(agentDir, sessionDir) {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'
+  const env = {
+    PATH: [
+      dirname(process.execPath),
+      join(repo, 'node_modules', '.bin'),
+      ...(process.platform === 'win32'
+        ? [join(systemRoot, 'System32'), systemRoot]
+        : ['/usr/bin', '/bin']),
+    ].join(delimiter),
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_CODING_AGENT_SESSION_DIR: sessionDir,
+    PI_SKIP_VERSION_CHECK: '1',
+    PI_TELEMETRY: '0',
+  }
+  if (process.platform === 'win32') {
+    Object.assign(env, {
+      SystemRoot: systemRoot,
+      WINDIR: systemRoot,
+      ComSpec: process.env.ComSpec || join(systemRoot, 'System32', 'cmd.exe'),
+      PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD',
+      TEMP: tmpdir(),
+      TMP: tmpdir(),
+    })
+    for (const key of ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432']) {
+      if (process.env[key]) env[key] = process.env[key]
+    }
+  } else {
+    env.TMPDIR = tmpdir()
+  }
+  return env
+}
 
 async function getCommands(projectDir, agentDir, sessionDir) {
   const child = spawn(pi, ['--mode', 'rpc', '--session-dir', sessionDir], {
     cwd: projectDir,
-    env: {
-      PATH: `${dirname(process.execPath)}:${join(repo, 'node_modules', '.bin')}:/usr/bin:/bin`,
-      TMPDIR: tmpdir(),
-      PI_CODING_AGENT_DIR: agentDir,
-      PI_CODING_AGENT_SESSION_DIR: sessionDir,
-      PI_SKIP_VERSION_CHECK: '1',
-      PI_TELEMETRY: '0',
-    },
+    env: piEnvironment(agentDir, sessionDir),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let stderr = ''
@@ -29,24 +62,23 @@ async function getCommands(projectDir, agentDir, sessionDir) {
   const lines = createInterface({ input: child.stdout })
 
   return await new Promise((resolveCommands, rejectCommands) => {
+    let commands
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
       rejectCommands(new Error(`Pi project trust probe timed out: ${stderr}`))
     }, 15_000)
     child.once('error', rejectCommands)
     child.once('exit', (code) => {
-      if (code !== 0) {
-        clearTimeout(timer)
-        rejectCommands(new Error(`Pi project trust probe exited code=${code}: ${stderr}`))
-      }
+      clearTimeout(timer)
+      if (code === 0 && commands) resolveCommands(commands)
+      else rejectCommands(new Error(`Pi project trust probe exited code=${code}: ${stderr}`))
     })
     lines.on('line', (line) => {
       let event
       try { event = JSON.parse(line) } catch { return }
       if (event.type !== 'response' || event.command !== 'get_commands') return
-      clearTimeout(timer)
+      commands = event.data?.commands ?? []
       child.stdin.end()
-      resolveCommands(event.data?.commands ?? [])
     })
     child.stdin.write(`${JSON.stringify({ id: 'commands', type: 'get_commands' })}\n`)
   })
@@ -86,5 +118,5 @@ try {
     toolApprovalGranted: false,
   }))
 } finally {
-  await rm(root, { recursive: true, force: true })
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 }

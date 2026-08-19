@@ -32,7 +32,6 @@
     "active": true,
     "targets": [
       "dmg",
-      "msi",
       "nsis"
     ],
     "externalBin": [
@@ -42,12 +41,10 @@
       "../LICENSE": "LICENSE",
       "../NOTICE": "NOTICE",
       "resources/skills": "skills",
-      "resources/pi": "pi"
+      "resources/pi": "pi",
+      "resources/client-plugins": "client-plugins"
     },
     "windows": {
-      "wix": {
-        "version": "0.1.0"
-      },
       "nsis": {
         "installerIcon": "icons/icon.ico"
       }

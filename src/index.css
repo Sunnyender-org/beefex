@@ -1,7 +1,7 @@
 /* 导入 TailwindCSS v4 */
 @import "tailwindcss";
-/* BFLabs 只提供真实 Beefex 屏幕使用的设计 token，不提供独立产品路由或第二套组件系统。 */
-@import "./bflabs/tokens.css";
+/* Canonical BF Labs tokens and primitives, vendored from the pinned upstream source. */
+@import "./bflabs/vendor/src/styles/index.css";
 /* 导入 TailwindCSS 排版插件 */
 @plugin "@tailwindcss/typography";
 
@@ -528,15 +528,16 @@ body {
 /* ===== BFLabs-owned Beefex workbench tokens =====
    布局沿用已验证的紧凑工作台，BFLabs 只统一材质、文字、状态与焦点语义。 */
 .chat-window-shell {
-  --beef-workbench: var(--bflabs-canvas);
-  --beef-surface: var(--bflabs-surface);
-  --beef-raised: var(--bflabs-surface-raised);
-  --beef-text: var(--bflabs-text);
-  --beef-text-secondary: var(--bflabs-text-muted);
-  --beef-border: var(--bflabs-divider);
-  --beef-active: var(--bflabs-accent);
-  --beef-pressed: var(--bflabs-accent-pressed);
-  --beef-verified: var(--bflabs-success);
+  --beef-workbench: var(--bf-background);
+  --beef-surface: var(--bf-surface);
+  --beef-overlay-surface: color-mix(in srgb, var(--bf-color-warm-white) 96%, var(--bf-color-sand));
+  --beef-raised: var(--bf-color-sand);
+  --beef-text: var(--bf-foreground);
+  --beef-text-secondary: var(--bf-foreground-muted);
+  --beef-border: var(--bf-divider);
+  --beef-active: var(--bf-accent);
+  --beef-pressed: color-mix(in srgb, var(--bf-accent) 84%, var(--bf-foreground));
+  --beef-verified: #4f7a58;
   --theme-surface: var(--beef-workbench);
   --theme-surface-soft: var(--beef-raised);
   --theme-surface-muted: var(--beef-raised);
@@ -557,7 +558,7 @@ body {
   width: 100%;
   display: flex;
   overflow: hidden;
-  border-radius: var(--bflabs-radius-surface);
+  border-radius: var(--bf-radius-surface);
   border: 1px solid rgba(0, 0, 0, 0.06);
   background: var(--beef-workbench);
   box-shadow:
@@ -567,15 +568,24 @@ body {
 }
 
 .dark .chat-window-shell {
-  --beef-workbench: var(--bflabs-canvas);
-  --beef-surface: var(--bflabs-surface);
-  --beef-raised: var(--bflabs-surface-raised);
-  --beef-text: var(--bflabs-text);
-  --beef-text-secondary: var(--bflabs-text-muted);
-  --beef-border: var(--bflabs-divider);
-  --beef-active: var(--bflabs-accent);
-  --beef-pressed: var(--bflabs-accent-pressed);
-  --beef-verified: var(--bflabs-success);
+  --bf-background: var(--bf-color-charcoal);
+  --bf-surface: color-mix(in srgb, var(--bf-color-warm-white) 5%, transparent);
+  --bf-surface-strong: var(--bf-color-warm-white);
+  --bf-foreground: var(--bf-color-warm-white);
+  --bf-foreground-muted: var(--bf-color-light-gray);
+  --bf-foreground-subtle: var(--bf-color-silver);
+  --bf-on-strong: var(--bf-color-charcoal);
+  --bf-divider: color-mix(in srgb, var(--bf-color-warm-white) 17%, transparent);
+  --beef-workbench: var(--bf-background);
+  --beef-surface: var(--bf-surface);
+  --beef-overlay-surface: color-mix(in srgb, var(--bf-color-charcoal) 90%, var(--bf-color-graphite));
+  --beef-raised: color-mix(in srgb, var(--bf-color-warm-white) 8%, transparent);
+  --beef-text: var(--bf-foreground);
+  --beef-text-secondary: var(--bf-foreground-muted);
+  --beef-border: var(--bf-divider);
+  --beef-active: var(--bf-accent);
+  --beef-pressed: color-mix(in srgb, var(--bf-accent) 82%, var(--bf-color-warm-white));
+  --beef-verified: #84ad8b;
   --theme-surface: var(--beef-workbench);
   --theme-surface-soft: var(--beef-raised);
   --theme-surface-muted: var(--beef-raised);
@@ -668,17 +678,13 @@ body {
 }
 
 .beef-sidebar-brand-mark {
-  display: inline-flex;
-  width: 27px;
-  height: 27px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--beef-active);
-  border-radius: 0;
-  color: var(--beef-active);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
-  font-size: 10px;
-  font-weight: 700;
+  width: 34px;
+  height: auto;
+  flex: 0 0 auto;
+}
+
+.dark .beef-sidebar-brand-mark {
+  filter: brightness(0) invert(1);
 }
 
 .beef-sidebar-brand-copy {
@@ -710,6 +716,12 @@ body {
 
 .chat-composer-shell {
   background: var(--beef-surface, var(--theme-surface));
+}
+
+/* The composer shell already carries the keyboard focus treatment. Suppress
+   the canonical global outline on its nested textarea to avoid a second ring. */
+.chat-composer-shell textarea:focus-visible {
+  outline: none;
 }
 
 .chat-titlebar-row {
@@ -758,7 +770,7 @@ body {
   gap: 6px;
   padding: 0 8px;
   border: 1px solid var(--beef-border);
-  border-radius: var(--bflabs-radius-control);
+  border-radius: var(--bf-radius-control);
   background: var(--beef-surface);
   color: var(--beef-text-secondary);
   font-size: 11px;
@@ -784,6 +796,14 @@ body {
   white-space: nowrap;
 }
 
+.beef-managed-model-popover {
+  background: var(--beef-overlay-surface);
+}
+
+.chat-composer-shell .beef-managed-model {
+  max-width: min(210px, 34vw);
+}
+
 .beef-approval-dialog {
   border-color: var(--beef-active);
   border-left-width: 3px;
@@ -795,6 +815,25 @@ body {
 .beef-approval-backdrop {
   background: rgba(17, 20, 23, 0.38);
   backdrop-filter: blur(2px);
+}
+
+.beef-approval-action {
+  min-height: 32px;
+  letter-spacing: 0.08em;
+}
+
+.beef-approval-action--reject {
+  border: 1px solid var(--beef-border);
+}
+
+.beef-approval-action--approve {
+  background: var(--beef-active);
+  color: var(--bf-color-charcoal);
+}
+
+.beef-approval-action--approve:hover:not(:disabled) {
+  background: var(--beef-pressed);
+  color: var(--bf-color-charcoal);
 }
 
 .beef-task-status--idle,
@@ -834,6 +873,13 @@ body {
   color: #b42318;
 }
 
+.beef-task-status {
+  min-height: 24px;
+  padding-inline: 8px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
 .dark .beef-task-status--failed {
   color: #ff9a8d;
 }
@@ -845,8 +891,12 @@ body {
   color: var(--beef-text);
 }
 
+.beef-completion-receipt__status {
+  white-space: nowrap;
+}
+
 .chat-sidebar-shell button {
-  border-radius: var(--bflabs-radius-control);
+  border-radius: var(--bf-radius-control);
 }
 
 .beef-account-popover {
@@ -857,7 +907,7 @@ body {
   z-index: 50;
   padding: 10px;
   border: 1px solid var(--beef-border);
-  border-radius: var(--bflabs-radius-surface);
+  border-radius: var(--bf-radius-surface);
   background: var(--beef-surface);
   color: var(--beef-text);
   box-shadow: 0 12px 28px rgba(33, 29, 26, 0.14);
@@ -919,7 +969,7 @@ body {
   margin-top: 8px;
   padding: 0 8px;
   border: 0;
-  border-radius: var(--bflabs-radius-control);
+  border-radius: var(--bf-radius-control);
   background: var(--beef-raised);
   color: var(--beef-text);
   font-size: 11px;
@@ -943,7 +993,7 @@ body {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  border-radius: var(--bflabs-radius-control);
+  border-radius: var(--bf-radius-control);
   background: var(--beef-active);
   color: #fff8f0;
   font-size: 11px;
@@ -1341,8 +1391,6 @@ body {
   overflow: hidden;
   isolation: isolate;
   background-color: var(--beef-workbench);
-  background-image:
-    linear-gradient(90deg, transparent 0, transparent calc(50% - 1px), color-mix(in srgb, var(--beef-border) 48%, transparent) 50%, transparent calc(50% + 1px));
 }
 
 .dark .chat-empty-hero {
@@ -1366,9 +1414,15 @@ body {
   letter-spacing: -0.035em;
 }
 
+.beef-empty-task-tag {
+  margin-inline: auto;
+  background: transparent;
+  padding-inline: 0;
+  color: var(--beef-active);
+}
+
 .beef-user-prompt {
   border: 1px solid var(--beef-border);
-  border-right: 3px solid var(--beef-active);
   background: var(--beef-surface);
   color: var(--beef-text);
 }
@@ -1393,7 +1447,7 @@ body {
   margin-bottom: 6px;
   padding: 8px 10px;
   border: 1px solid var(--beef-border);
-  border-radius: var(--bflabs-radius-surface);
+  border-radius: var(--bf-radius-surface);
   background: color-mix(in srgb, var(--beef-surface) 72%, transparent);
 }
 
@@ -2094,13 +2148,13 @@ body {
 
 .chat-window-shell button:focus-visible {
   outline: none;
-  box-shadow: var(--bflabs-focus-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bf-focus) 38%, transparent);
   /* 键盘聚焦时焦点环缓入；失焦时瞬退（不拖尾），是更利落的行为。 */
   transition: box-shadow var(--kv-dur-fast) var(--kv-ease-out);
 }
 
 .dark .chat-window-shell button:focus-visible {
-  box-shadow: var(--bflabs-focus-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bf-focus) 38%, transparent);
 }
 
 .chat-window-shell button:active:not(:disabled) {
@@ -2134,7 +2188,7 @@ body {
   --accent: var(--beef-active);
   --accent-hover: var(--beef-pressed);
   --accent-soft: color-mix(in srgb, var(--beef-active) 12%, transparent);
-  --radius-card: var(--bflabs-radius-surface);
+  --radius-card: var(--bf-radius-surface);
   background: var(--bg);
   overflow: hidden;
   font-size: 13px;
@@ -2209,7 +2263,7 @@ body {
   width: 100%;
   padding: 8px 10px;
   border: none;
-  border-radius: var(--bflabs-radius-control);
+  border-radius: var(--bf-radius-control);
   background: transparent;
   text-align: left;
   font-size: 13px;
@@ -2358,7 +2412,7 @@ body {
 }
 
 .settings-embedded .kv-panel {
-  border-radius: var(--bflabs-radius-surface);
+  border-radius: var(--bf-radius-surface);
   border-color: var(--border);
   background: var(--bg-input-subtle);
 }
@@ -2372,13 +2426,13 @@ body {
 
 .settings-embedded-savebar .kv-btn.primary {
   min-width: 72px;
-  border-radius: var(--bflabs-radius-control);
+  border-radius: var(--bf-radius-control);
   padding: 6px 16px;
   font-weight: 500;
 }
 
 .settings-embedded-savebar .kv-btn:not(.primary) {
-  border-radius: var(--bflabs-radius-control);
+  border-radius: var(--bf-radius-control);
 }
 
 /* 模型页：加宽、拉高左侧供应商列表，预设合并在列表内 */

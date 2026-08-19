@@ -2352,7 +2352,10 @@ while True:
         async fn lost_response_does_not_block_later_request() {
             let script = write_fake_server();
             let state = std::sync::Arc::new(test_app_state());
-            state.settings_write().chat_tools.tool_timeout_ms = 1_000;
+            // Windows hosted runners can take more than one second to spawn Python
+            // and finish the initial MCP handshake. Keep setup outside the short
+            // timeout used below to exercise a deliberately lost tool response.
+            state.settings_write().chat_tools.tool_timeout_ms = 5_000;
             let mut marker = std::env::temp_dir();
             marker.push(format!("beefex-fake-mcp-hol-{}.txt", uuid::Uuid::new_v4()));
             let mut server = python_server(&script);
@@ -2365,6 +2368,7 @@ while True:
                 .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "warm" }))
                 .await
                 .expect("warmup ok");
+            state.settings_write().chat_tools.tool_timeout_ms = 1_000;
 
             let first_state = state.clone();
             let first_server = server.clone();

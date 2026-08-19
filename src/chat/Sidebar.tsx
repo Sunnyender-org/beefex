@@ -41,6 +41,7 @@ import {
   canUseManagedBeefApiAccount,
   hasBeefApiAccountMetadata,
 } from '../beefapi/accountPresentation'
+import { BrandMark } from '../bflabs/vendor/src/components/Brand'
 
 function resolveChatUserProfile(
   chat?: { userDisplayName?: string; userAvatar?: string } | null,
@@ -982,7 +983,7 @@ export const Sidebar = memo(function Sidebar({
         </div>
 
       <div className="beef-sidebar-brand" data-tauri-drag-region="false">
-        <span className="beef-sidebar-brand-mark" aria-hidden="true">BF</span>
+        <BrandMark className="beef-sidebar-brand-mark" />
         <span className="beef-sidebar-brand-copy">
           <strong>BEEFEX</strong>
           <small>PI WORKBENCH</small>
@@ -1023,35 +1024,26 @@ export const Sidebar = memo(function Sidebar({
         ) : (
           <>
             <div className="flex items-center justify-between px-3 pb-1 pt-3">
-              <div className="flex items-center gap-1.5 text-[13px] font-semibold">
+              <div className="flex items-center gap-1 text-[13px] font-semibold" role="tablist" aria-label="侧栏内容">
                 {([
                   ['conversations', '最近任务'],
                   ['projects', '项目'],
-                ] as const).flatMap(([tab, label], i) => {
-                  const button = (
+                ] as const).map(([tab, label]) => (
                     <button
                       key={tab}
                       type="button"
                       onClick={() => setActiveTab(tab)}
-                      className={`rounded-md px-1.5 py-0.5 transition-colors ${
+                      className={`rounded-[3px] border px-2 py-1 transition-[background-color,border-color,color,box-shadow] ${
                         activeTab === tab
-                          ? 'text-neutral-900 dark:text-neutral-100'
-                          : 'text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300'
+                          ? 'border-[var(--beef-border)] bg-[var(--beef-surface)] text-neutral-900 shadow-sm dark:text-neutral-100'
+                          : 'border-transparent text-neutral-400 hover:bg-black/[0.03] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.05] dark:hover:text-neutral-300'
                       }`}
-                      aria-current={activeTab === tab}
+                      role="tab"
+                      aria-selected={activeTab === tab}
                     >
                       {label}
                     </button>
-                  )
-                  return i === 0
-                    ? [button]
-                    : [
-                        <span key={`sep-${tab}`} className="text-neutral-300 dark:text-neutral-700">
-                          /
-                        </span>,
-                        button,
-                      ]
-                })}
+                  ))}
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 {activeTab === 'conversations' && (

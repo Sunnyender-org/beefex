@@ -8,8 +8,8 @@ use super::{
     account::{AccountTransport, TransportFuture},
     credential_store::{FileCredentialStore, SecretCredential},
     types::{
-        AuthStartResponse, DiscoveryResponse, ManagedCredential, PollResponse, CLIENT_ID,
-        REQUIRED_GROUP,
+        AuthStartResponse, DiscoveryResponse, ManagedClientCredential, ManagedClientCredentials,
+        ManagedCredential, PollResponse, CLIENT_ID, REQUIRED_GROUP,
     },
 };
 
@@ -201,6 +201,55 @@ impl AccountTransport for BeefApiClient {
             Err("token_revoke_failed".to_string())
         })
     }
+
+    fn ensure_client_credentials<'a>(
+        &'a self,
+        credential: &'a SecretCredential,
+        base_url: &'a str,
+    ) -> TransportFuture<'a, ManagedClientCredentials> {
+        Box::pin(async move {
+            if base_url != self.base_url {
+                return Err("untrusted_base_url".to_string());
+            }
+            let response = self
+                .http
+                .post(self.endpoint("v1/dashboard/beefex/client-credentials")?)
+                .bearer_auth(credential.expose())
+                .send()
+                .await
+                .map_err(|_| "network_unavailable".to_string())?;
+            if response.status() == StatusCode::UNAUTHORIZED
+                || response.status() == StatusCode::FORBIDDEN
+            {
+                return Err("reauthorization_required".to_string());
+            }
+            if !response.status().is_success() {
+                return Err(read_error_code(response).await);
+            }
+            let body = response
+                .json::<ManagedClientCredentialsResponse>()
+                .await
+                .map_err(|_| "invalid_managed_client_credentials_response".to_string())?;
+            if !body.success || body.base_url.trim().is_empty() {
+                return Err("invalid_managed_client_credentials_response".to_string());
+            }
+            Ok(ManagedClientCredentials {
+                origin: body.base_url,
+                gpt: ManagedClientCredential {
+                    credential: SecretCredential::new(body.credentials.gpt.key),
+                    group: body.credentials.gpt.group,
+                },
+                claude: ManagedClientCredential {
+                    credential: SecretCredential::new(body.credentials.claude.key),
+                    group: body.credentials.claude.group,
+                },
+                grok: ManagedClientCredential {
+                    credential: SecretCredential::new(body.credentials.grok.key),
+                    group: body.credentials.grok.group,
+                },
+            })
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -230,6 +279,26 @@ struct TokenResponse {
 #[derive(Deserialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Deserialize)]
+struct ManagedClientCredentialsResponse {
+    success: bool,
+    base_url: String,
+    credentials: ManagedClientCredentialPair,
+}
+
+#[derive(Deserialize)]
+struct ManagedClientCredentialPair {
+    gpt: ManagedClientCredentialResponse,
+    claude: ManagedClientCredentialResponse,
+    grok: ManagedClientCredentialResponse,
+}
+
+#[derive(Deserialize)]
+struct ManagedClientCredentialResponse {
+    key: String,
+    group: String,
 }
 
 async fn read_error_code(response: reqwest::Response) -> String {

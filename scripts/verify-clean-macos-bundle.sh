@@ -38,6 +38,9 @@ pi_bin="$resources/pi/bin/pi"
 [[ -x "$pi_bin" ]]
 [[ -f "$resources/pi/beefex-managed-provider-extension.ts" ]]
 [[ -f "$resources/pi/beefex-policy-extension.ts" ]]
+[[ -f "$resources/pi/beefex-client-setup-extension.ts" ]]
+[[ -f "$resources/client-plugins/beefapi-codex-image2.sh" ]]
+[[ -f "$resources/client-plugins/beefapi-codex-image2.ps1" ]]
 [[ -d "$resources/skills" ]]
 
 isolated_root="$(mktemp -d)"
