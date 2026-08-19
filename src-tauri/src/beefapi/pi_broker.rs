@@ -21,7 +21,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const LOCAL_AUTHORIZATION: &str = "Bearer beefex-parent-broker";
 
 struct BrokerConfig {
-    upstream_url: String,
+    upstream_base: String,
     credential: String,
     group: String,
 }
@@ -48,15 +48,22 @@ impl BrokerConfig {
             .next()
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "managed_provider_model_missing".to_string())?;
-        let upstream_url = format!("{}/responses", base_url.trim_end_matches('/'));
         Ok((
             Self {
-                upstream_url,
+                upstream_base: base_url.trim_end_matches('/').to_string(),
                 credential,
                 group: routing_group,
             },
             model,
         ))
+    }
+}
+
+fn broker_upstream_route(path: &str, capability_root: &str) -> Option<&'static str> {
+    match path.strip_prefix(capability_root)? {
+        "/responses" => Some("responses"),
+        "/chat/completions" => Some("chat/completions"),
+        _ => None,
     }
 }
 
@@ -105,7 +112,7 @@ impl PiProviderBroker {
             .local_addr()
             .map_err(|_| "pi_provider_broker_bind_failed".to_string())?;
         let capability = Uuid::new_v4().simple().to_string();
-        let request_path = format!("/{capability}/v1/responses");
+        let capability_root = format!("/{capability}/v1");
         let endpoint = format!("http://{address}/{capability}/v1");
         let config = Arc::new(config);
         let authorization_rejected = Arc::new(AtomicBool::new(false));
@@ -117,11 +124,11 @@ impl PiProviderBroker {
                 }
                 let http = http.clone();
                 let config = config.clone();
-                let request_path = request_path.clone();
+                let capability_root = capability_root.clone();
                 let rejected = rejected.clone();
                 tokio::spawn(async move {
                     if let Err(reason) =
-                        handle_connection(stream, &http, &config, &request_path, &rejected).await
+                        handle_connection(stream, &http, &config, &capability_root, &rejected).await
                     {
                         eprintln!("[pi-broker] request failed: {reason}");
                     }
@@ -228,7 +235,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     http: &Client,
     config: &BrokerConfig,
-    request_path: &str,
+    capability_root: &str,
     authorization_rejected: &AtomicBool,
 ) -> Result<(), String> {
     let request = match read_request(&mut stream).await {
@@ -238,14 +245,18 @@ async fn handle_connection(
             return Ok(());
         }
     };
-    if request.path != request_path || request.authorization.as_deref() != Some(LOCAL_AUTHORIZATION)
-    {
+    let Some(route) = broker_upstream_route(&request.path, capability_root) else {
+        write_error(&mut stream, 404, "broker_capability_not_found").await?;
+        return Ok(());
+    };
+    if request.authorization.as_deref() != Some(LOCAL_AUTHORIZATION) {
         write_error(&mut stream, 404, "broker_capability_not_found").await?;
         return Ok(());
     }
 
+    let upstream_url = format!("{}/{route}", config.upstream_base);
     let mut upstream = http
-        .post(&config.upstream_url)
+        .post(&upstream_url)
         .bearer_auth(&config.credential)
         .header("x-beefex-group", &config.group)
         .header(ACCEPT_ENCODING, "identity");
@@ -388,8 +399,46 @@ mod tests {
             .unwrap()
             .contains("response.completed"));
         let request = request.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("post /v1/responses"));
         assert!(request.contains(&format!("authorization: bearer {SECRET}")));
         assert!(request.contains("x-beefex-group: gpt-pro"));
+    }
+
+    #[tokio::test]
+    async fn broker_forwards_chat_completions_for_claude_fable() {
+        let (base_url, request) = mock_upstream().await;
+        let mut model_groups = std::collections::BTreeMap::new();
+        model_groups.insert("claude-fable-5".to_string(), "claude max".to_string());
+        let provider = hydrate_managed_provider(
+            &SafeAccountMetadata {
+                email: "ender@example.com".to_string(),
+                group: REQUIRED_GROUP.to_string(),
+                default_model: "gpt-5.6-sol".to_string(),
+                allowed_models: vec!["gpt-5.6-sol".to_string(), "claude-fable-5".to_string()],
+                model_groups,
+                key_name: "Beefex".to_string(),
+                base_url,
+            },
+            &SecretCredential::new(SECRET.to_string()),
+            Some("claude-fable-5"),
+        )
+        .unwrap();
+        let broker = PiProviderBroker::start(Client::new(), provider)
+            .await
+            .unwrap();
+        let response = Client::new()
+            .post(format!("{}/chat/completions", broker.endpoint()))
+            .header("authorization", LOCAL_AUTHORIZATION)
+            .json(&serde_json::json!({ "model": broker.model(), "stream": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = request.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("post /v1/chat/completions"));
+        assert!(!request.contains("post /v1/responses"));
+        assert!(request.contains(&format!("authorization: bearer {SECRET}")));
+        assert!(request.contains("x-beefex-group: claude%20max"));
     }
 
     #[tokio::test]
@@ -425,6 +474,23 @@ mod tests {
         let request = request.await.unwrap().to_ascii_lowercase();
         assert!(request.contains("x-beefex-group: claude%20max"));
         assert_eq!(encode_beefex_group_header("claude max"), "claude%20max");
+    }
+
+    #[test]
+    fn broker_accepts_only_responses_and_chat_completions_under_the_capability() {
+        assert_eq!(
+            broker_upstream_route("/abc/v1/responses", "/abc/v1"),
+            Some("responses")
+        );
+        assert_eq!(
+            broker_upstream_route("/abc/v1/chat/completions", "/abc/v1"),
+            Some("chat/completions")
+        );
+        assert_eq!(broker_upstream_route("/abc/v1/models", "/abc/v1"), None);
+        assert_eq!(
+            broker_upstream_route("/wrong/v1/chat/completions", "/abc/v1"),
+            None
+        );
     }
 
     #[test]

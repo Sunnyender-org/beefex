@@ -4,11 +4,11 @@ This is the in-app updater contract for the current Alpha line. It is not a gene
 
 ## Bootstrap truth
 
-This source line is `0.1.0-alpha.5`. About shows `v0.1.0-alpha.5`.
+This source line is `0.1.0-alpha.6`. About shows `v0.1.0-alpha.6`.
 
-Already-published Alpha 4 reports internal `0.1.0` and ships the old compile-time-disabled updater (`BEEFEX_UPDATE_REPO` unset). **Installed Alpha 4 cannot automatically discover or install Alpha 5.** Alpha 5 is the one-time manual/bootstrap release that introduces the updater. Users on Alpha 4 must install Alpha 5 by hand from the download page.
+Already-published Alpha 4 reports internal `0.1.0` and ships the old compile-time-disabled updater (`BEEFEX_UPDATE_REPO` unset). **Installed Alpha 4 cannot automatically discover or install Alpha 5 or later.** Alpha 5 is the one-time manual/bootstrap release that introduces the updater. Users on Alpha 4 must install Alpha 5 by hand from the download page.
 
-The first real in-app upgrade evidence is Alpha 5 → a later Alpha, or a controlled synthetic fixture. Version-comparator tests may still order `0.1.0` before `0.1.0-alpha.N`; that is comparator-only and is not an auto-upgrade claim.
+Alpha 6 is the first candidate for a real in-app Alpha 5 → Alpha 6 upgrade. That upgrade is not proven until a published Alpha 6 object is discovered and installed from a running Alpha 5. Version-comparator tests may still order `0.1.0` before `0.1.0-alpha.N`; that is comparator-only and is not an auto-upgrade claim.
 
 Versioned Alpha 4 objects remain at `beefex/releases/v0.1.0-alpha.4/` for manual rollback.
 
@@ -29,12 +29,12 @@ Do **not** consume `latest.json` or Electron `latest.yml` / `latest-mac.yml`.
 3. Otherwise list GitHub releases on `Sunnyender-org/beefex`, pick the newest non-draft tag, read `beefex.alpha-artifact.v1`, and require that receipt SHA-256 to match R2 `SHA256SUMS.txt`.
 4. Download only the R2 latest object for the current platform. Verify SHA-256 before install.
 
-Generate metadata at release time from the real SHA256SUMS and commit. The generator accepts any `0.1.0-alpha.N`; the current example/default is `0.1.0-alpha.5`:
+Generate metadata at release time from the real SHA256SUMS and commit. The generator accepts any `0.1.0-alpha.N`; the current example/default is `0.1.0-alpha.6`:
 
 ```bash
 node scripts/build-beefex-updater-metadata.mjs \
   --sha256sums /path/to/SHA256SUMS.txt \
-  --version 0.1.0-alpha.5 \
+  --version 0.1.0-alpha.6 \
   --commit <release-commit>
 ```
 

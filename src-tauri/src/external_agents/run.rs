@@ -359,7 +359,7 @@ pub async fn run_external_cli_reply(
     let mut tool_map: HashMap<String, usize> = HashMap::new();
     let mut usage: Option<ModelUsage> = None;
     let mut stream_outcome = "completed".to_string();
-    let mut stream_error: Option<String> = None;
+    let mut stream_error = DirectPiRunErrorState::default();
     let mut segment_order = 0u32;
     let mut segments: Vec<ChatMessageSegment> = Vec::new();
     let mut segment_tracker = StreamSegmentTracker::default();
@@ -583,7 +583,7 @@ pub async fn run_external_cli_reply(
                 crate::beefapi::account::emit_account_state(app, &account_state)
             })
             .await;
-        stream_error = Some(
+        stream_error.latch(
             account_state
                 .reason
                 .unwrap_or_else(|| "reauthorization_required".to_string()),
@@ -599,7 +599,7 @@ pub async fn run_external_cli_reply(
         if err != "cancelled" && content.trim().is_empty() && raw_output.trim().is_empty() {
             raw_output = format!("{} 读取输出失败：{}", def.name, err);
         }
-    } else if stream_error.is_some() {
+    } else if stream_error.message.is_some() {
         stream_outcome = "error".to_string();
     } else if child_exit_forced {
         stream_outcome = "error".to_string();
@@ -1426,6 +1426,71 @@ fn push_tool_segment(
     segment
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DirectPiRunErrorState {
+    message: Option<String>,
+    continued_after_error: bool,
+}
+
+impl DirectPiRunErrorState {
+    fn latch(&mut self, message: String) {
+        self.message = Some(message);
+        self.continued_after_error = false;
+    }
+
+    fn clear(&mut self) {
+        self.message = None;
+        self.continued_after_error = false;
+    }
+
+    fn mark_continued(&mut self) {
+        if self.message.is_some() {
+            self.continued_after_error = true;
+        }
+    }
+
+    fn apply(&mut self, event: &UnifiedAgentEvent) {
+        match event {
+            UnifiedAgentEvent::Error { message } => self.latch(message.clone()),
+            UnifiedAgentEvent::PiToolResult {
+                is_error: false, ..
+            }
+            | UnifiedAgentEvent::ToolResult {
+                is_error: false, ..
+            } => self.mark_continued(),
+            UnifiedAgentEvent::RuntimeStatus { kind, data } => match kind.as_str() {
+                "turn_end" => match turn_end_stop_reason(data) {
+                    Some("stop") => self.clear(),
+                    Some("error") => self.latch(turn_end_error_message(data)),
+                    _ => {}
+                },
+                "auto_retry_end"
+                    if data.get("success").and_then(serde_json::Value::as_bool) == Some(true) =>
+                {
+                    self.mark_continued();
+                }
+                "agent_settled" if self.continued_after_error => self.clear(),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+fn turn_end_stop_reason(data: &serde_json::Value) -> Option<&str> {
+    data.get("message")
+        .and_then(|message| message.get("stopReason"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn turn_end_error_message(data: &serde_json::Value) -> String {
+    data.get("message")
+        .and_then(|message| message.get("errorMessage"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Pi agent error")
+        .to_string()
+}
+
 fn apply_unified_event(
     app: &AppHandle,
     conversation_id: &str,
@@ -1437,13 +1502,14 @@ fn apply_unified_event(
     tool_calls: &mut Vec<ToolCallRecord>,
     tool_map: &mut HashMap<String, usize>,
     usage: &mut Option<ModelUsage>,
-    stream_error: &mut Option<String>,
+    stream_error: &mut DirectPiRunErrorState,
     segments: &mut Vec<ChatMessageSegment>,
     segment_order: &mut u32,
     segment_tracker: &mut StreamSegmentTracker,
     cwd: &std::path::Path,
     event: UnifiedAgentEvent,
 ) {
+    stream_error.apply(&event);
     let now = Local::now().timestamp();
     match event {
         UnifiedAgentEvent::TextDelta { delta } => {
@@ -1564,7 +1630,6 @@ fn apply_unified_event(
         }
         UnifiedAgentEvent::Error { message, .. } => {
             eprintln!("[external-agent] stream error: {message}");
-            *stream_error = Some(message);
         }
         UnifiedAgentEvent::Raw { line } => {
             // Unparsed stdout line — accumulate (capped) as a fallback surfaced only if the run
@@ -1725,6 +1790,86 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::external_agents::session::pi_rpc::map_pi_rpc_event;
+    use serde_json::Value;
+
+    fn reduce_mapped_pi_events(raw_events: &[&str]) -> DirectPiRunErrorState {
+        let mut state = DirectPiRunErrorState::default();
+        for raw in raw_events {
+            let value: Value = serde_json::from_str(raw).expect("pi event json");
+            map_pi_rpc_event(&value, &mut |event| state.apply(&event));
+        }
+        state
+    }
+
+    #[test]
+    fn intermediate_assistant_error_then_stop_and_settled_is_completed() {
+        let state = reduce_mapped_pi_events(&[
+            r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"server_is_overloaded"}}"#,
+            r#"{"type":"auto_retry_start","attempt":1}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"write","args":{"path":"a.txt"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t1","isError":false,"result":{"content":"ok"}}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t2","toolName":"bash","args":{"command":"pwd"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t2","isError":false,"result":{"content":"/tmp"}}"#,
+            r#"{"type":"turn_end","message":{"stopReason":"stop"}}"#,
+            r#"{"type":"agent_settled"}"#,
+        ]);
+        assert_eq!(state.message, None);
+    }
+
+    #[test]
+    fn intermediate_assistant_error_then_tools_and_settled_is_completed() {
+        let state = reduce_mapped_pi_events(&[
+            r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"server_is_overloaded"}}"#,
+            r#"{"type":"auto_retry_start","attempt":1}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"ls"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t1","isError":false,"result":{"content":"ok"}}"#,
+            r#"{"type":"agent_settled"}"#,
+        ]);
+        assert_eq!(state.message, None);
+    }
+
+    #[test]
+    fn terminal_assistant_error_without_later_success_stays_failed() {
+        let state = reduce_mapped_pi_events(&[
+            r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"server_is_overloaded"}}"#,
+            r#"{"type":"agent_end"}"#,
+            r#"{"type":"agent_settled"}"#,
+        ]);
+        assert_eq!(state.message.as_deref(), Some("server_is_overloaded"));
+    }
+
+    #[test]
+    fn auto_retry_exhausted_without_later_success_stays_failed() {
+        let state = reduce_mapped_pi_events(&[
+            r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"server_is_overloaded"}}"#,
+            r#"{"type":"auto_retry_end","success":false,"finalError":"server_is_overloaded"}"#,
+            r#"{"type":"agent_settled"}"#,
+        ]);
+        assert_eq!(state.message.as_deref(), Some("server_is_overloaded"));
+    }
+
+    #[test]
+    fn failed_tool_after_error_does_not_count_as_recovery() {
+        let state = reduce_mapped_pi_events(&[
+            r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"server_is_overloaded"}}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"false"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t1","isError":true,"result":{"content":"boom"}}"#,
+            r#"{"type":"agent_settled"}"#,
+        ]);
+        assert_eq!(state.message.as_deref(), Some("server_is_overloaded"));
+    }
+
+    #[test]
+    fn auto_retry_end_without_success_does_not_clear_error_on_settle() {
+        let state = reduce_mapped_pi_events(&[
+            r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"server_is_overloaded"}}"#,
+            r#"{"type":"auto_retry_end"}"#,
+            r#"{"type":"agent_settled"}"#,
+        ]);
+        assert_eq!(state.message.as_deref(), Some("server_is_overloaded"));
+    }
 
     #[test]
     fn managed_client_setup_uses_default_for_missing_or_blank_model() {

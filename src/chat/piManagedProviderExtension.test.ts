@@ -36,6 +36,35 @@ describe('Pi managed provider extension', () => {
     expect(process.env.BEEFEX_PI_MODEL).toBeUndefined()
   })
 
+  it('keeps GPT-family coding models on Responses and routes other chat models to completions', () => {
+    const cases: Array<[string, 'openai-responses' | 'openai-completions']> = [
+      ['gpt-5.6-sol', 'openai-responses'],
+      ['claude-fable-5', 'openai-completions'],
+      ['grok-4.6', 'openai-completions'],
+      ['glm-5.2', 'openai-completions'],
+    ]
+
+    for (const [model, api] of cases) {
+      process.env.BEEFEX_PI_BROKER_URL = BROKER_URL
+      process.env.BEEFEX_PI_MODEL = model
+      const registrations: Array<[string, Record<string, unknown>]> = []
+      registerManagedProvider({
+        registerProvider(name, config) {
+          registrations.push([name, config])
+        },
+      })
+      expect(registrations).toEqual([
+        [
+          'beefex-managed',
+          expect.objectContaining({
+            api,
+            models: [expect.objectContaining({ id: model })],
+          }),
+        ],
+      ])
+    }
+  })
+
   it('rejects non-loopback endpoints after erasing both bootstrap values', () => {
     process.env.BEEFEX_PI_BROKER_URL = 'https://beefapi.com/v1'
     process.env.BEEFEX_PI_MODEL = 'gpt-5.6-sol'

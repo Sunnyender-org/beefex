@@ -975,8 +975,8 @@ mod tests {
   "schema_version": "beefex.updater.v1",
   "product": "Beefex",
   "identifier": "com.beefapi.beefex",
-  "version": "0.1.0-alpha.5",
-  "tag": "v0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
+  "tag": "v0.1.0-alpha.6",
   "channel": "alpha",
   "notes": ["next Alpha line"],
   "assets": {{
@@ -999,7 +999,8 @@ mod tests {
     fn prerelease_versions_compare_in_alpha_order() {
         assert!(is_newer_version("0.1.0-alpha.4", "0.1.0-alpha.3"));
         assert!(is_newer_version("0.1.0-alpha.5", "0.1.0-alpha.4"));
-        assert!(!is_newer_version("0.1.0-alpha.5", "0.1.0-alpha.5"));
+        assert!(is_newer_version("0.1.0-alpha.6", "0.1.0-alpha.5"));
+        assert!(!is_newer_version("0.1.0-alpha.6", "0.1.0-alpha.6"));
         assert!(!is_newer_version("0.1.0-alpha.5", "0.1.1"));
     }
 
@@ -1028,7 +1029,7 @@ mod tests {
     #[test]
     fn beefex_updater_document_is_accepted() {
         let document = parse_beefex_updater_document(&sample_updater_json()).unwrap();
-        assert_eq!(document.version, "0.1.0-alpha.5");
+        assert_eq!(document.version, "0.1.0-alpha.6");
         assert_eq!(
             document.assets.get("macos-aarch64").unwrap().file,
             "beefex-desktop-mac-arm64.dmg"
@@ -1220,13 +1221,13 @@ mod tests {
     #[test]
     fn staged_identity_requires_beefex_id_and_expected_version() {
         assert!(
-            verify_staged_identity("com.beefapi.beefex", "0.1.0-alpha.5", "v0.1.0-alpha.5").is_ok()
+            verify_staged_identity("com.beefapi.beefex", "0.1.0-alpha.6", "v0.1.0-alpha.6").is_ok()
         );
         assert!(
-            verify_staged_identity("com.apple.finder", "0.1.0-alpha.5", "0.1.0-alpha.5").is_err()
+            verify_staged_identity("com.apple.finder", "0.1.0-alpha.6", "0.1.0-alpha.6").is_err()
         );
         assert!(
-            verify_staged_identity("com.beefapi.beefex", "0.1.0-alpha.4", "0.1.0-alpha.5").is_err()
+            verify_staged_identity("com.beefapi.beefex", "0.1.0-alpha.5", "0.1.0-alpha.6").is_err()
         );
     }
 
@@ -1237,14 +1238,14 @@ mod tests {
               <key>CFBundleIdentifier</key>
               <string>com.beefapi.beefex</string>
               <key>CFBundleShortVersionString</key>
-              <string>0.1.0-alpha.5</string>
+              <string>0.1.0-alpha.6</string>
             </dict>
         "#;
         assert_eq!(
             parse_bundle_identity(plist).unwrap(),
             (
                 "com.beefapi.beefex".to_string(),
-                "0.1.0-alpha.5".to_string()
+                "0.1.0-alpha.6".to_string()
             )
         );
     }
@@ -1292,9 +1293,13 @@ mod tests {
     #[test]
     fn normalize_release_version_accepts_alpha_tags() {
         assert_eq!(
+            normalize_release_version("v0.1.0-alpha.6").as_deref(),
+            Some("0.1.0-alpha.6")
+        );
+        assert_eq!(
             normalize_release_version("v0.1.0-alpha.5").as_deref(),
             Some("0.1.0-alpha.5")
         );
-        assert_eq!(normalize_release_version("0.1.0-alpha.5/asset"), None);
+        assert_eq!(normalize_release_version("0.1.0-alpha.6/asset"), None);
     }
 }

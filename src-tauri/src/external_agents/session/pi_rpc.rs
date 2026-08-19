@@ -1426,6 +1426,28 @@ mod tests {
     }
 
     #[test]
+    fn map_pi_turn_end_error_emits_error_and_stop_does_not() {
+        let error: Value = serde_json::from_str(
+            r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"server_is_overloaded"}}"#,
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        map_pi_rpc_event(&error, &mut |event| events.push(event));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::Error { message } if message == "server_is_overloaded"
+        )));
+
+        let stop: Value =
+            serde_json::from_str(r#"{"type":"turn_end","message":{"stopReason":"stop"}}"#).unwrap();
+        events.clear();
+        map_pi_rpc_event(&stop, &mut |event| events.push(event));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::Error { .. })));
+    }
+
+    #[test]
     fn map_pi_agent_settled() {
         let raw = r#"{"type":"agent_settled"}"#;
         let value: Value = serde_json::from_str(raw).unwrap();

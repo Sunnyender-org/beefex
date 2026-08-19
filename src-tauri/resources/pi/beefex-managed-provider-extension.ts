@@ -24,6 +24,17 @@ function trustedLoopbackEndpoint(raw: string): string {
   return endpoint.toString().replace(/\/$/, "")
 }
 
+// Pi 0.84.1 KnownApi: "openai-responses" | "openai-completions".
+// GPT-family coding models stay on Responses; Claude/Grok/GLM and other chat models
+// use openai-completions (Chat Completions). Do not invent a third identifier.
+function managedProviderApi(model: string): "openai-responses" | "openai-completions" {
+  const id = model.toLowerCase()
+  if (id.startsWith("gpt-") || /^o\d(?:-|$)/.test(id)) {
+    return "openai-responses"
+  }
+  return "openai-completions"
+}
+
 export default function registerManagedProvider(pi: ExtensionApi) {
   const rawBaseUrl = takeEnvironment("BEEFEX_PI_BROKER_URL")
   const model = takeEnvironment("BEEFEX_PI_MODEL")
@@ -35,7 +46,7 @@ export default function registerManagedProvider(pi: ExtensionApi) {
     name: "BeefAPI",
     baseUrl,
     apiKey: "beefex-parent-broker",
-    api: "openai-responses",
+    api: managedProviderApi(model),
     models: [{
       id: model,
       name: model,
