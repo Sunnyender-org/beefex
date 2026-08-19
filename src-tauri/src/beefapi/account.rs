@@ -1210,6 +1210,7 @@ mod tests {
             group: "gpt-pro".to_string(),
             default_model: "gpt-5.6-sol".to_string(),
             allowed_models: vec!["gpt-5.6-sol".to_string()],
+            model_groups: Default::default(),
             key_name: "Beefex".to_string(),
             base_url: "https://beefapi.com/v1".to_string(),
         }))));
@@ -1737,6 +1738,7 @@ mod tests {
             group: "gpt-pro".to_string(),
             default_model: "gpt-5.6-sol".to_string(),
             allowed_models: vec!["gpt-5.6-sol".to_string()],
+            model_groups: Default::default(),
             key_name: "Beefex".to_string(),
             base_url: "https://beefapi.com/v1".to_string(),
         }))));

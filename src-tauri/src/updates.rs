@@ -1,174 +1,531 @@
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
-use std::{fs, io::Write};
+use std::{collections::HashMap, fs, io::Write, path::Path};
 
+#[cfg(any(target_os = "macos", test))]
+use std::path::PathBuf;
+
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use uuid::Uuid;
 
 use crate::api::with_standard_request_timeout;
 use crate::state::AppState;
 
-// Internal alpha builds have no release channel. A future release build must
-// opt in at compile time instead of inheriting legacy upstream's update feed.
-const UPDATE_REPO: Option<&str> = option_env!("BEEFEX_UPDATE_REPO");
+const R2_LATEST_BASE: &str =
+    "https://pub-e540a6ea6d6e4af19d7f5fc4d1f07c47.r2.dev/beefex/releases/latest";
+const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/Sunnyender-org/beefex/releases";
+const PUBLIC_DOWNLOAD_PAGE: &str = "https://beefapi.com/download";
+const UPDATER_SCHEMA: &str = "beefex.updater.v1";
+const ARTIFACT_SCHEMA: &str = "beefex.alpha-artifact.v1";
+const PRODUCT_NAME: &str = "Beefex";
+const PRODUCT_IDENTIFIER: &str = "com.beefapi.beefex";
+const USER_DATA_MARKER: &str = "com.beefapi.beefex";
 
-/// 检查 GitHub Releases 的最新版本。
+/// 检查当前 Alpha 线是否有更新。
 ///
-/// 双通道：先查 `api.github.com`（能拿到 release notes）；失败（网络 / 非 2xx /
-/// 限流 / 解析）时回退查 `github.com` 的 releases atom feed —— 因为 `api.github.com` 在部分
-/// 网络下被单独墙掉或限流（60 次/小时/IP），而 `github.com` 本体仍可访问。两条都失败时返回
-/// `checkFailed:true`，让前端明确显示"检查失败"而不是伪装成"已是最新"（会误导用户）。
+/// 主通道是 R2 `beefex-updater.json`（Beefex 自有合同，不是 Electron latest.yml）。
+/// 该对象尚未发布时，回退到 GitHub `beefex.alpha-artifact.v1` + R2 `SHA256SUMS.txt`，
+/// 安装包永远走下载页同名的 R2 latest 对象。旧的 `latest.json` / `latest.yml` 会被拒绝。
 #[tauri::command]
 pub(crate) async fn check_github_latest_release(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let Some(repo) = UPDATE_REPO else {
-        return Ok(serde_json::json!({
-            "available": false,
-            "updatesDisabled": true
-        }));
-    };
+    Ok(check_beefex_update(&state).await)
+}
+
+async fn check_beefex_update(state: &AppState) -> serde_json::Value {
     let current = env!("CARGO_PKG_VERSION");
+    let Some(platform) = current_platform_asset() else {
+        return serde_json::json!({
+            "available": false,
+            "updatesDisabled": true,
+            "reason": "unsupported_platform",
+        });
+    };
 
-    // 主通道：api.github.com（成功即返回，无论 available 真假）。
-    if let Some(json) = try_api_latest(&state, repo, current).await {
-        return Ok(json);
+    match resolve_latest_release(state, &platform).await {
+        Ok(release) => {
+            let available = is_newer_version(&release.version, current);
+            serde_json::json!({
+                "available": available,
+                "version": release.version,
+                "tag": release.tag,
+                "htmlUrl": release.html_url,
+                "body": release.notes,
+                "publishedAt": release.published_at,
+                "sha256": release.sha256,
+                "assetName": release.asset_name,
+                "source": release.source,
+                "commit": release.commit,
+            })
+        }
+        Err(_) => serde_json::json!({
+            "available": false,
+            "checkFailed": true,
+        }),
     }
-    // 回退通道：github.com atom feed（用户能访问 github.com 但 api.github.com 不通/被限流时）。
-    if let Some(json) = try_atom_latest(&state, repo, current).await {
-        return Ok(json);
-    }
-    // 两条都失败：明确告知检查失败，不伪装成"最新"。
-    Ok(serde_json::json!({ "available": false, "checkFailed": true }))
 }
 
-/// 主通道：`api.github.com/repos/{REPO}/releases/latest`。
-/// 返回 `Some(json)` 当且仅当请求成功且 JSON 解析成功（此时 available 可真可假）；
-/// 任何网络 / 非 2xx / 解析失败都返回 `None`，交给 atom 回退。
-async fn try_api_latest(state: &AppState, repo: &str, current: &str) -> Option<serde_json::Value> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let response = with_standard_request_timeout(
-        state
-            .http
-            .get(&url)
-            // GitHub API 要求显式 User-Agent
-            .header(
-                "User-Agent",
-                format!("Beefex/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .header("Accept", "application/vnd.github+json"),
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlatformAsset {
+    key: &'static str,
+    file: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRelease {
+    version: String,
+    tag: String,
+    html_url: String,
+    notes: String,
+    published_at: String,
+    sha256: String,
+    asset_name: String,
+    source: &'static str,
+    commit: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct BeefexUpdaterDocument {
+    schema_version: String,
+    product: String,
+    identifier: String,
+    version: String,
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    source_commit: String,
+    #[serde(default)]
+    notes: serde_json::Value,
+    #[serde(default)]
+    assets: HashMap<String, BeefexUpdaterAsset>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct BeefexUpdaterAsset {
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    sha256: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GithubRelease {
+    #[serde(default)]
+    tag_name: String,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    published_at: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GithubReleaseAsset {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    browser_download_url: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct AlphaArtifact {
+    schema_version: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    tag: String,
+    #[serde(default)]
+    source_commit: String,
+    #[serde(default)]
+    artifact: String,
+    #[serde(default)]
+    sha256: String,
+}
+
+fn current_platform_asset() -> Option<PlatformAsset> {
+    platform_asset(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn platform_asset(os: &str, arch: &str) -> Option<PlatformAsset> {
+    match (os, arch) {
+        ("macos", "aarch64") => Some(PlatformAsset {
+            key: "macos-aarch64",
+            file: "beefex-desktop-mac-arm64.dmg",
+        }),
+        ("windows", "x86_64") => Some(PlatformAsset {
+            key: "windows-x86_64",
+            file: "beefex-desktop-win-x64.exe",
+        }),
+        _ => None,
+    }
+}
+
+fn updater_base_url() -> String {
+    std::env::var("BEEFEX_UPDATE_BASE")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| R2_LATEST_BASE.to_string())
+}
+
+fn github_releases_url() -> String {
+    std::env::var("BEEFEX_UPDATE_RELEASES_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| GITHUB_RELEASES_URL.to_string())
+}
+
+async fn resolve_latest_release(
+    state: &AppState,
+    platform: &PlatformAsset,
+) -> Result<ResolvedRelease, String> {
+    let sums = fetch_text(state, &format!("{}/SHA256SUMS.txt", updater_base_url())).await?;
+    let checksums = parse_sha256sums(&sums).ok_or_else(|| "invalid_sha256sums".to_string())?;
+    let expected = checksums
+        .get(platform.file)
+        .cloned()
+        .ok_or_else(|| "platform_asset_missing".to_string())?;
+
+    if let Some(release) = try_r2_updater_document(state, platform, &expected).await {
+        return Ok(release);
+    }
+    compose_from_github_artifact(state, platform, &expected).await
+}
+
+async fn try_r2_updater_document(
+    state: &AppState,
+    platform: &PlatformAsset,
+    expected_sha256: &str,
+) -> Option<ResolvedRelease> {
+    let body = fetch_text(
+        state,
+        &format!("{}/beefex-updater.json", updater_base_url()),
     )
-    .send()
     .await
     .ok()?;
-
-    if !response.status().is_success() {
+    let document = parse_beefex_updater_document(&body)?;
+    let asset = document.assets.get(platform.key)?;
+    let file = if asset.file.is_empty() {
+        platform.file
+    } else {
+        asset.file.as_str()
+    };
+    if file != platform.file {
         return None;
     }
-
-    let value: serde_json::Value = response.json().await.ok()?;
-
-    let tag = value.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
-    let html_url = value.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
-    let body = value.get("body").and_then(|v| v.as_str()).unwrap_or("");
-    let published_at = value
-        .get("published_at")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    // tag_name 通常是 "v2.5.0"，剥掉前缀 v 再比较
-    let latest = tag.trim_start_matches('v');
-
-    Some(serde_json::json!({
-      "available": is_newer_version(latest, current),
-      "version": latest,
-      "tag": tag,
-      "htmlUrl": html_url,
-      "body": body,
-      "publishedAt": published_at,
-    }))
-}
-
-/// 回退通道：`github.com/{REPO}/releases.atom`（走 github.com 主体，非 api 子域）。
-/// 只解析最新 tag —— 没有 assets / body，`htmlUrl` 由 tag 拼出，够前端展示 + "去 GitHub 下载"。
-async fn try_atom_latest(state: &AppState, repo: &str, current: &str) -> Option<serde_json::Value> {
-    let url = format!("https://github.com/{repo}/releases.atom");
-    let response = with_standard_request_timeout(
-        state
-            .http
-            .get(&url)
-            .header(
-                "User-Agent",
-                format!("Beefex/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .header("Accept", "application/atom+xml"),
-    )
-    .send()
-    .await
-    .ok()?;
-
-    if !response.status().is_success() {
+    if !same_sha256(&asset.sha256, expected_sha256) {
         return None;
     }
-
-    let xml = response.text().await.ok()?;
-    let tag = parse_latest_tag_from_atom(&xml)?;
-    let latest = tag.trim_start_matches('v');
-
-    Some(serde_json::json!({
-      "available": is_newer_version(latest, current),
-      "version": latest,
-      "tag": tag,
-      "htmlUrl": format!("https://github.com/{repo}/releases/tag/{tag}"),
-      "body": "",
-      "publishedAt": "",
-      "viaFallback": true,
-    }))
+    if !asset.url.is_empty() && !asset.url.contains("/beefex/releases/latest/") {
+        return None;
+    }
+    let version = document.version;
+    let tag = if document.tag.is_empty() {
+        format!("v{version}")
+    } else {
+        document.tag
+    };
+    Some(ResolvedRelease {
+        version,
+        tag,
+        html_url: PUBLIC_DOWNLOAD_PAGE.to_string(),
+        notes: notes_from_value(&document.notes),
+        published_at: String::new(),
+        sha256: expected_sha256.to_string(),
+        asset_name: platform.file.to_string(),
+        source: "r2-updater",
+        commit: document.source_commit,
+    })
 }
 
-/// 从 releases atom feed 里抽取最新 release 的 tag。
-/// atom 里首个 `<entry>` 是最新，其 `<link href=".../releases/tag/<TAG>">` 是可靠来源。
-/// 只做朴素字符串扫描（避免引 XML 依赖）：定位首个 `/releases/tag/`，读到下一个 `"`/`<`/空白为止。
-fn parse_latest_tag_from_atom(xml: &str) -> Option<String> {
-    const MARKER: &str = "/releases/tag/";
-    let start = xml.find(MARKER)? + MARKER.len();
-    let rest = &xml[start..];
-    let tag: String = rest
-        .chars()
-        .take_while(|c| !matches!(c, '"' | '<' | '>' | ' ' | '\t' | '\r' | '\n'))
-        .collect();
-    let tag = tag.trim();
-    if tag.is_empty() {
+async fn compose_from_github_artifact(
+    state: &AppState,
+    platform: &PlatformAsset,
+    expected_sha256: &str,
+) -> Result<ResolvedRelease, String> {
+    let releases_json = fetch_text(state, &github_releases_url()).await?;
+    let releases: Vec<GithubRelease> =
+        serde_json::from_str(&releases_json).map_err(|_| "invalid_github_releases".to_string())?;
+    let release = pick_latest_github_release(&releases)
+        .ok_or_else(|| "github_release_missing".to_string())?;
+    let version = normalize_release_version(&release.tag_name)
+        .ok_or_else(|| "invalid_release_tag".to_string())?;
+    let artifact_name = if platform.file.ends_with(".dmg") {
+        "beefex-alpha-artifact.json"
+    } else {
+        "beefex-windows-alpha-artifact.json"
+    };
+    let artifact_url = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == artifact_name)
+        .map(|asset| asset.browser_download_url.clone())
+        .ok_or_else(|| "github_artifact_missing".to_string())?;
+    let artifact_json = fetch_text(state, &artifact_url).await?;
+    let artifact =
+        parse_alpha_artifact(&artifact_json).ok_or_else(|| "invalid_alpha_artifact".to_string())?;
+    if artifact.artifact != platform.file || !same_sha256(&artifact.sha256, expected_sha256) {
+        return Err("r2_checksum_mismatch".to_string());
+    }
+    if let Some(sums_url) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS.txt")
+        .map(|asset| asset.browser_download_url.as_str())
+    {
+        if let Ok(github_sums) = fetch_text(state, sums_url).await {
+            if let Some(github_checksums) = parse_sha256sums(&github_sums) {
+                if !github_checksums
+                    .get(platform.file)
+                    .is_some_and(|hash| same_sha256(hash, expected_sha256))
+                {
+                    return Err("r2_checksum_mismatch".to_string());
+                }
+            }
+        }
+    }
+    Ok(ResolvedRelease {
+        version,
+        tag: release.tag_name.clone(),
+        html_url: if release.html_url.is_empty() {
+            PUBLIC_DOWNLOAD_PAGE.to_string()
+        } else {
+            release.html_url.clone()
+        },
+        notes: release.body.clone(),
+        published_at: release.published_at.clone(),
+        sha256: expected_sha256.to_string(),
+        asset_name: platform.file.to_string(),
+        source: "github-artifact+r2",
+        commit: artifact.source_commit,
+    })
+}
+
+fn parse_beefex_updater_document(body: &str) -> Option<BeefexUpdaterDocument> {
+    let document: BeefexUpdaterDocument = serde_json::from_str(body).ok()?;
+    if document.schema_version != UPDATER_SCHEMA
+        || document.product != PRODUCT_NAME
+        || document.identifier != PRODUCT_IDENTIFIER
+    {
+        return None;
+    }
+    normalize_release_version(&document.version)?;
+    Some(document)
+}
+
+fn parse_alpha_artifact(body: &str) -> Option<AlphaArtifact> {
+    let artifact: AlphaArtifact = serde_json::from_str(body).ok()?;
+    if artifact.schema_version != ARTIFACT_SCHEMA
+        || artifact.artifact.is_empty()
+        || !is_sha256(&artifact.sha256)
+    {
+        return None;
+    }
+    Some(artifact)
+}
+
+fn pick_latest_github_release(releases: &[GithubRelease]) -> Option<&GithubRelease> {
+    releases
+        .iter()
+        .filter(|release| !release.draft && normalize_release_version(&release.tag_name).is_some())
+        .max_by(|left, right| {
+            let left_version = normalize_release_version(&left.tag_name).unwrap();
+            let right_version = normalize_release_version(&right.tag_name).unwrap();
+            match (
+                is_newer_version(&left_version, &right_version),
+                is_newer_version(&right_version, &left_version),
+            ) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => std::cmp::Ordering::Equal,
+            }
+        })
+}
+
+fn parse_sha256sums(text: &str) -> Option<HashMap<String, String>> {
+    let mut checksums = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (hash, name) = line.split_once(char::is_whitespace)?;
+        let hash = hash.trim().to_ascii_lowercase();
+        let name = name.trim().trim_start_matches('*').trim();
+        if !is_sha256(&hash) || name.is_empty() {
+            return None;
+        }
+        checksums.insert(name.to_string(), hash);
+    }
+    if checksums.is_empty() {
         None
     } else {
-        Some(tag.to_string())
+        Some(checksums)
     }
 }
 
-/// 朴素 semver 比较：把 "x.y.z" 拆成数字三元组按字典序比较
-/// 不处理 prerelease (-beta) / build metadata (+abc)；返回 latest > current
-fn is_newer_version(latest: &str, current: &str) -> bool {
-    let parse = |s: &str| -> (u32, u32, u32) {
-        let mut it = s.split('.').map(|p| {
-            // 截断到第一个非数字（兼容 "1.0.0-beta" 这类）
-            p.chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .parse::<u32>()
-                .unwrap_or(0)
-        });
-        (
-            it.next().unwrap_or(0),
-            it.next().unwrap_or(0),
-            it.next().unwrap_or(0),
-        )
-    };
-    parse(latest) > parse(current)
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// 只接受可安全放进 Git tag、URL path 与安装包文件名的 semver-ish 版本号。
-/// 当前发布使用三段数字，可选 `-prerelease`；拒绝 `/`、`?`、空格等路径字符。
+fn same_sha256(left: &str, right: &str) -> bool {
+    is_sha256(left) && left.eq_ignore_ascii_case(right)
+}
+
+fn notes_from_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn user_agent() -> String {
+    format!("Beefex/{}", env!("CARGO_PKG_VERSION"))
+}
+
+async fn fetch_text(state: &AppState, url: &str) -> Result<String, String> {
+    let response = with_standard_request_timeout(
+        state
+            .http
+            .get(url)
+            .header("User-Agent", user_agent())
+            .header("Accept", "application/json, text/plain;q=0.9, */*;q=0.8"),
+    )
+    .send()
+    .await
+    .map_err(|_| "update_check_network_failed".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("update_check_http_{}", response.status().as_u16()));
+    }
+    response
+        .text()
+        .await
+        .map_err(|_| "update_check_body_invalid".to_string())
+}
+
+/// 比较 Beefex Alpha 版本。
+///
+/// `0.1.0` 无预发布后缀时视为早于 `0.1.0-alpha.N`。这只是比较器语义。
+/// 已发布的 Alpha 4 把 updater 编译期关掉了，不能靠这个比较自动发现 Alpha 5。
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    let Some(latest) = parse_version(latest) else {
+        return false;
+    };
+    let Some(current) = parse_version(current) else {
+        return true;
+    };
+    latest > current
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+    prerelease: Option<Vec<PrereleasePart>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrereleasePart {
+    Number(u32),
+    Text(String),
+}
+
+impl PartialOrd for ParsedVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ParsedVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.major
+            .cmp(&other.major)
+            .then(self.minor.cmp(&other.minor))
+            .then(self.patch.cmp(&other.patch))
+            .then_with(|| match (&self.prerelease, &other.prerelease) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(parts)) if is_untagged_alpha_predecessor(self, parts) => {
+                    std::cmp::Ordering::Less
+                }
+                (Some(parts), None) if is_untagged_alpha_predecessor(other, parts) => {
+                    std::cmp::Ordering::Greater
+                }
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(left), Some(right)) => compare_prerelease(left, right),
+            })
+    }
+}
+
+fn is_untagged_alpha_predecessor(version: &ParsedVersion, parts: &[PrereleasePart]) -> bool {
+    version.major == 0
+        && version.minor == 1
+        && version.patch == 0
+        && matches!(parts.first(), Some(PrereleasePart::Text(label)) if label == "alpha")
+}
+
+fn compare_prerelease(left: &[PrereleasePart], right: &[PrereleasePart]) -> std::cmp::Ordering {
+    for (left_part, right_part) in left.iter().zip(right.iter()) {
+        let order = match (left_part, right_part) {
+            (PrereleasePart::Number(a), PrereleasePart::Number(b)) => a.cmp(b),
+            (PrereleasePart::Text(a), PrereleasePart::Text(b)) => a.cmp(b),
+            (PrereleasePart::Number(_), PrereleasePart::Text(_)) => std::cmp::Ordering::Less,
+            (PrereleasePart::Text(_), PrereleasePart::Number(_)) => std::cmp::Ordering::Greater,
+        };
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn parse_version(raw: &str) -> Option<ParsedVersion> {
+    let version = normalize_release_version(raw)?;
+    let (core, prerelease) = version
+        .split_once('-')
+        .map(|(core, prerelease)| (core, Some(prerelease)))
+        .unwrap_or((version.as_str(), None));
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let prerelease = prerelease.map(|value| {
+        value
+            .split('.')
+            .map(|part| {
+                if let Ok(number) = part.parse::<u32>() {
+                    PrereleasePart::Number(number)
+                } else {
+                    PrereleasePart::Text(part.to_string())
+                }
+            })
+            .collect()
+    });
+    Some(ParsedVersion {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
 fn normalize_release_version(version: &str) -> Option<String> {
     let trimmed = version.trim();
     let version = trimmed.strip_prefix('v').unwrap_or(trimmed);
@@ -195,56 +552,217 @@ fn normalize_release_version(version: &str) -> Option<String> {
     Some(version.to_string())
 }
 
-/// 根据发布打包契约生成当前平台的远端资产名，不再依赖 GitHub API 列举 assets。
-fn release_asset_name_for(version: &str, os: &str, arch: &str) -> Option<String> {
-    match (os, arch) {
-        ("macos", "aarch64") => Some(format!("Beefex_{version}_aarch64.dmg")),
-        ("macos", "x86_64") => Some(format!("Beefex_{version}_x64.dmg")),
-        ("windows", "x86_64") => Some(format!("Beefex_{version}_x64-setup.exe")),
-        _ => None,
+fn latest_asset_url(file: &str) -> String {
+    format!("{}/{file}", updater_base_url())
+}
+
+#[cfg(test)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_encode(&Sha256::digest(bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn normalize_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
+}
+
+fn path_touches_user_data(path: &Path) -> bool {
+    normalize_path_key(path).contains(USER_DATA_MARKER)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_real_nonsymlink_app(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    !metadata.file_type().is_symlink()
+        && metadata.is_dir()
+        && path.extension().and_then(|ext| ext.to_str()) == Some("app")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn discover_unique_real_app(mount_point: &Path) -> Result<PathBuf, String> {
+    let mut apps = Vec::new();
+    for entry in fs::read_dir(mount_point).map_err(|e| format!("读取挂载点失败: {e}"))? {
+        let path = entry.map_err(|e| format!("读取挂载点失败: {e}"))?.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("app") {
+            apps.push(path);
+        }
     }
+    if apps.len() != 1 {
+        return Err(format!("DMG 必须恰好包含一个 .app，实际 {}", apps.len()));
+    }
+    let app = apps.remove(0);
+    if app.file_name().and_then(|name| name.to_str()) != Some("Beefex.app") {
+        return Err("DMG 内不是 Beefex.app".to_string());
+    }
+    if !is_real_nonsymlink_app(&app) {
+        return Err("DMG 内的 Beefex.app 必须是真实目录，不能是符号链接".to_string());
+    }
+    Ok(app)
 }
 
-fn release_download_url(repo: &str, version: &str, asset_name: &str) -> String {
-    format!("https://github.com/{repo}/releases/download/v{version}/{asset_name}")
+#[cfg(any(target_os = "macos", test))]
+fn plist_string_value(plist: &str, key: &str) -> Option<String> {
+    let marker = format!("<key>{key}</key>");
+    let rest = plist.split_once(&marker)?.1;
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = rest[start..].find("</string>")?;
+    Some(rest[start..start + end].trim().to_string())
 }
 
-/// 下载新版本安装包到 OS temp dir，边下边 emit "update-download-progress" 事件。
-/// 返回本地文件绝对路径。失败 Err 含详细原因（前端显示）。
+#[cfg(any(target_os = "macos", test))]
+fn parse_bundle_identity(plist: &str) -> Result<(String, String), String> {
+    let identifier = plist_string_value(plist, "CFBundleIdentifier")
+        .ok_or_else(|| "staged bundle missing CFBundleIdentifier".to_string())?;
+    let version = plist_string_value(plist, "CFBundleShortVersionString")
+        .or_else(|| plist_string_value(plist, "CFBundleVersion"))
+        .ok_or_else(|| "staged bundle missing version".to_string())?;
+    Ok((identifier, version))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn verify_staged_identity(
+    identifier: &str,
+    version: &str,
+    expected_version: &str,
+) -> Result<(), String> {
+    if identifier != PRODUCT_IDENTIFIER {
+        return Err(format!(
+            "staged bundle id {identifier} is not {PRODUCT_IDENTIFIER}"
+        ));
+    }
+    let actual = normalize_release_version(version)
+        .ok_or_else(|| format!("staged version invalid: {version}"))?;
+    let expected = normalize_release_version(expected_version)
+        .ok_or_else(|| format!("expected version invalid: {expected_version}"))?;
+    if actual != expected {
+        return Err(format!("staged version {actual} != {expected}"));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacosSwapPlan {
+    staged_app: PathBuf,
+    target_app: PathBuf,
+    backup_app: PathBuf,
+    failed_app: PathBuf,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacosRollbackMoves {
+    target_to_failed: bool,
+    backup_to_target: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn plan_macos_swap(applications: &Path, swap_id: &str) -> Result<MacosSwapPlan, String> {
+    if swap_id.is_empty()
+        || swap_id.contains('/')
+        || swap_id.contains('\\')
+        || swap_id.contains("..")
+    {
+        return Err("invalid macos swap id".to_string());
+    }
+    let plan = MacosSwapPlan {
+        staged_app: applications.join(format!(".Beefex.staged-{swap_id}.app")),
+        target_app: applications.join("Beefex.app"),
+        backup_app: applications.join(format!(".Beefex.previous-{swap_id}.app")),
+        failed_app: applications.join(format!(".Beefex.failed-{swap_id}.app")),
+    };
+    let parents = [
+        plan.staged_app.parent(),
+        plan.target_app.parent(),
+        plan.backup_app.parent(),
+        plan.failed_app.parent(),
+    ];
+    if parents.iter().any(|parent| *parent != Some(applications)) {
+        return Err("macos swap paths must stay in the same directory".to_string());
+    }
+    for path in [
+        &plan.staged_app,
+        &plan.target_app,
+        &plan.backup_app,
+        &plan.failed_app,
+    ] {
+        if path_touches_user_data(path) {
+            return Err("拒绝写入用户数据目录".to_string());
+        }
+    }
+    Ok(plan)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn plan_macos_rollback(
+    target_exists: bool,
+    backup_exists: bool,
+) -> Result<MacosRollbackMoves, String> {
+    if !backup_exists {
+        return Err("没有可恢复的备份".to_string());
+    }
+    Ok(MacosRollbackMoves {
+        target_to_failed: target_exists,
+        backup_to_target: true,
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn restore_macos_backup(plan: &MacosSwapPlan) -> Result<(), String> {
+    let moves = plan_macos_rollback(plan.target_app.exists(), plan.backup_app.exists())?;
+    if moves.target_to_failed {
+        fs::rename(&plan.target_app, &plan.failed_app)
+            .map_err(|e| format!("无法把失败的新版本移到同目录: {e}"))?;
+    }
+    fs::rename(&plan.backup_app, &plan.target_app)
+        .map_err(|e| format!("回滚上一版 Beefex.app 失败: {e}"))
+}
+
+/// 下载新版本安装包到 OS temp dir，边下边校验 SHA-256，并 emit "update-download-progress"。
 #[tauri::command]
 pub(crate) async fn download_update_asset(
     app: AppHandle,
     state: State<'_, AppState>,
     version: String,
+    sha256: Option<String>,
 ) -> Result<String, String> {
-    let repo = UPDATE_REPO
-        .ok_or_else(|| "Beefex internal alpha update channel is not configured".to_string())?;
     let version = normalize_release_version(&version)
         .ok_or_else(|| format!("无效的 release 版本号: {version}"))?;
-    let name = release_asset_name_for(&version, std::env::consts::OS, std::env::consts::ARCH)
-        .ok_or_else(|| {
-            format!(
-                "没有匹配当前平台({}/{})的安装包",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            )
-        })?;
-    let asset_url = release_download_url(repo, &version, &name);
-
-    // 决定本地文件名：保留原扩展名（.dmg / .exe）便于 install 流程根据扩展名判断行为
-    let ext = std::path::Path::new(&name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
-    let dest = std::env::temp_dir().join(format!("beefex-update-{version}.{ext}"));
-
+    let platform = current_platform_asset().ok_or_else(|| {
+        format!(
+            "没有匹配当前平台({}/{})的安装包",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let sums = fetch_text(&state, &format!("{}/SHA256SUMS.txt", updater_base_url())).await?;
+    let checksums =
+        parse_sha256sums(&sums).ok_or_else(|| "无法解析 R2 SHA256SUMS.txt".to_string())?;
+    let expected = checksums
+        .get(platform.file)
+        .cloned()
+        .ok_or_else(|| format!("SHA256SUMS 缺少 {}", platform.file))?;
+    if let Some(provided) = sha256.as_deref() {
+        if !same_sha256(provided, &expected) {
+            return Err("更新元数据与 R2 SHA256SUMS 不一致".to_string());
+        }
+    }
+    let dest = std::env::temp_dir().join(format!("beefex-update-{version}-{}", platform.file));
+    if path_touches_user_data(&dest) {
+        return Err("拒绝写入用户数据目录".to_string());
+    }
+    let asset_url = latest_asset_url(platform.file);
     let mut resp = state
         .http
         .get(&asset_url)
-        .header(
-            "User-Agent",
-            format!("Beefex/{}", env!("CARGO_PKG_VERSION")),
-        )
+        .header("User-Agent", user_agent())
         .send()
         .await
         .map_err(|e| format!("下载失败: {e}"))?;
@@ -253,6 +771,7 @@ pub(crate) async fn download_update_asset(
     }
     let total = resp.content_length().unwrap_or(0);
     let mut file = fs::File::create(&dest).map_err(|e| format!("创建文件失败: {e}"))?;
+    let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut last_emitted_pct: i32 = -1;
     while let Some(chunk) = resp
@@ -262,13 +781,13 @@ pub(crate) async fn download_update_asset(
     {
         file.write_all(&chunk)
             .map_err(|e| format!("写入失败: {e}"))?;
+        hasher.update(&chunk);
         downloaded += chunk.len() as u64;
         let pct = if total > 0 {
             (downloaded * 100 / total) as i32
         } else {
             0
         };
-        // 节流：百分比变化才 emit，避免事件洪水（小 chunk 时容易刷爆）
         if pct != last_emitted_pct {
             last_emitted_pct = pct;
             let _ = app.emit(
@@ -281,7 +800,11 @@ pub(crate) async fn download_update_asset(
             );
         }
     }
-    // 收尾再 emit 一次确保 100% 落地
+    let actual = hex_encode(&hasher.finalize());
+    if !same_sha256(&actual, &expected) {
+        let _ = fs::remove_file(&dest);
+        return Err("下载文件 SHA-256 与 R2 SHA256SUMS 不一致".to_string());
+    }
     let _ = app.emit(
         "update-download-progress",
         serde_json::json!({
@@ -293,23 +816,38 @@ pub(crate) async fn download_update_asset(
     Ok(dest.to_string_lossy().to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn detach_dmg(mount_str: &str, mount_point: &Path) {
+    let _ = std::process::Command::new("hdiutil")
+        .args(["detach", "-force", mount_str])
+        .status();
+    let _ = fs::remove_dir(mount_point);
+}
+
 /// 启动安装包并退出当前应用。
-/// - macOS（.dmg）：hdiutil 挂载 → cp Beefex.app 到 /Applications → 卸载 → open 新版 → app.exit(0)
-/// - Windows（.exe）：spawn NSIS installer，立即 exit 让 installer 能写 exe
+/// macOS：只读挂载 → 暂存校验 → rename 交换；失败回滚备份。不删 Application Support / AppData。
 #[tauri::command]
-pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<(), String> {
-    let p = std::path::Path::new(&path);
+pub(crate) fn install_update_and_quit(
+    app: AppHandle,
+    path: String,
+    version: Option<String>,
+) -> Result<(), String> {
+    let p = Path::new(&path);
     if !p.exists() {
         return Err(format!("安装包不存在: {path}"));
+    }
+    if path_touches_user_data(p) {
+        return Err("拒绝从用户数据目录安装".to_string());
     }
 
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        // 显式指定挂载点（用 UUID 避免与同名 volume 已挂载时的名字冲突）。比解析 `hdiutil attach` 的
-        // 默认表格输出鲁棒很多 —— 那个输出列用空格 padding,VolumeName 含空格(如重复挂载产生的
-        // "legacy upstream 1")会被 split_whitespace 截断。
-        let mount_id = Uuid::new_v4().to_string();
+        let expected_version = version
+            .as_deref()
+            .and_then(normalize_release_version)
+            .ok_or_else(|| "macOS 安装需要有效的目标版本号".to_string())?;
+        let mount_id = Uuid::new_v4().simple().to_string();
         let mount_point = std::env::temp_dir().join(format!("beefex-mount-{mount_id}"));
         fs::create_dir_all(&mount_point).map_err(|e| format!("创建挂载目录失败: {e}"))?;
         let mount_str = mount_point.to_string_lossy().to_string();
@@ -331,54 +869,77 @@ pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<()
                 String::from_utf8_lossy(&attach.stderr)
             ));
         }
-        // 找挂载点下第一个 .app
-        let app_in_dmg = fs::read_dir(&mount_point)
-            .map_err(|e| format!("读取挂载点失败: {e}"))?
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("app"))
-            .ok_or_else(|| "DMG 内未找到 .app".to_string())?
-            .path();
-        let app_name = app_in_dmg
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| "解析 .app 名失败".to_string())?
-            .to_string();
-        let target = PathBuf::from("/Applications").join(&app_name);
-        // 删除旧 app 并 cp 新的（rm -rf 失败也忽略，cp 会用 -R 覆盖）
-        let _ = Command::new("rm")
-            .args(["-rf", &target.to_string_lossy()])
-            .status();
-        let cp = Command::new("cp")
-            .args([
-                "-R",
-                &app_in_dmg.to_string_lossy(),
-                &target.to_string_lossy(),
-            ])
-            .status()
-            .map_err(|e| format!("cp 失败: {e}"))?;
-        if !cp.success() {
-            let _ = Command::new("hdiutil")
-                .args(["detach", "-force", &mount_str])
-                .status();
-            let _ = fs::remove_dir(&mount_point);
-            return Err("cp 新版本到 /Applications 失败".to_string());
+        let app_in_dmg = match discover_unique_real_app(&mount_point) {
+            Ok(app) => app,
+            Err(reason) => {
+                detach_dmg(&mount_str, &mount_point);
+                return Err(reason);
+            }
+        };
+        let swap_id = Uuid::new_v4().simple().to_string();
+        let plan = match plan_macos_swap(Path::new("/Applications"), &swap_id) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                detach_dmg(&mount_str, &mount_point);
+                return Err(reason);
+            }
+        };
+        if plan.staged_app.exists() {
+            detach_dmg(&mount_str, &mount_point);
+            return Err("暂存安装路径已存在".to_string());
         }
-        // 卸载 + 删除空挂载目录
-        let _ = Command::new("hdiutil")
-            .args(["detach", "-force", &mount_str])
+        let ditto = Command::new("ditto")
+            .args([&app_in_dmg, &plan.staged_app])
             .status();
-        let _ = fs::remove_dir(&mount_point);
-        // 剥掉 quarantine 属性 —— DMG 文件本身带 com.apple.quarantine,挂载后 .app 继承这个属性,
-        // cp 到 /Applications 后 Gatekeeper 看到 quarantine + 未公证 → 静默拦截启动。
-        // xattr -rd 递归剥掉,与 README 里那条手动命令等效。
-        let _ = Command::new("xattr")
-            .args(["-rd", "com.apple.quarantine", &target.to_string_lossy()])
-            .status();
-        // open -n 强制开新实例
-        let _ = Command::new("open")
-            .args(["-n", &target.to_string_lossy()])
+        let ditto_ok = matches!(ditto, Ok(status) if status.success());
+        if !ditto_ok {
+            let _ = fs::remove_dir_all(&plan.staged_app);
+            detach_dmg(&mount_str, &mount_point);
+            return Err("复制暂存 Beefex.app 失败".to_string());
+        }
+        let plist_path = plan.staged_app.join("Contents/Info.plist");
+        let identity = fs::read_to_string(&plist_path)
+            .map_err(|e| format!("读取暂存 Info.plist 失败: {e}"))
+            .and_then(|plist| parse_bundle_identity(&plist))
+            .and_then(|(identifier, staged_version)| {
+                verify_staged_identity(&identifier, &staged_version, &expected_version)
+            });
+        if let Err(reason) = identity {
+            let _ = fs::remove_dir_all(&plan.staged_app);
+            detach_dmg(&mount_str, &mount_point);
+            return Err(reason);
+        }
+        let target_existed = plan.target_app.exists();
+        if target_existed {
+            if plan.backup_app.exists() {
+                let _ = fs::remove_dir_all(&plan.staged_app);
+                detach_dmg(&mount_str, &mount_point);
+                return Err("可回滚备份路径已存在".to_string());
+            }
+            if let Err(error) = fs::rename(&plan.target_app, &plan.backup_app) {
+                let _ = fs::remove_dir_all(&plan.staged_app);
+                detach_dmg(&mount_str, &mount_point);
+                return Err(format!("无法把当前应用移到备份位置: {error}"));
+            }
+        }
+        if let Err(error) = fs::rename(&plan.staged_app, &plan.target_app) {
+            if target_existed {
+                let _ = restore_macos_backup(&plan);
+            }
+            let _ = fs::remove_dir_all(&plan.staged_app);
+            detach_dmg(&mount_str, &mount_point);
+            return Err(format!("无法把暂存应用换到 /Applications: {error}"));
+        }
+        detach_dmg(&mount_str, &mount_point);
+        if let Err(error) = Command::new("open")
+            .args(["-n", &plan.target_app.to_string_lossy()])
             .spawn()
-            .map_err(|e| format!("open 新版本失败: {e}"))?;
+        {
+            if target_existed {
+                let _ = restore_macos_backup(&plan);
+            }
+            return Err(format!("open 新版本失败: {error}"));
+        }
         app.exit(0);
         return Ok(());
     }
@@ -386,6 +947,7 @@ pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<()
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
+        let _ = version;
         Command::new(&path)
             .spawn()
             .map_err(|e| format!("启动 installer 失败: {e}"))?;
@@ -395,7 +957,7 @@ pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<()
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = app;
+        let _ = (app, version);
         Err("当前平台不支持自动安装".to_string())
     }
 }
@@ -404,120 +966,335 @@ pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<()
 mod tests {
     use super::*;
 
-    #[test]
-    fn is_newer_version_handles_basic_semver() {
-        assert!(is_newer_version("2.5.0", "2.4.0"));
-        assert!(is_newer_version("2.4.1", "2.4.0"));
-        assert!(is_newer_version("3.0.0", "2.99.99"));
-        assert!(!is_newer_version("2.4.0", "2.4.0"));
-        assert!(!is_newer_version("2.3.9", "2.4.0"));
-        assert!(!is_newer_version("1.99.99", "2.0.0"));
+    const ALPHA4_MAC: &str = "9887c1dddc735d39bd064473316ab4cb7cd6fe7ad4ccb3170025ba14c488b1c9";
+    const ALPHA4_WIN: &str = "38ba09c229f7beea1cac865ed1c22e54e48b45e6a3d4c2f43ee460d4ad2c1cee";
+
+    fn sample_updater_json() -> String {
+        format!(
+            r#"{{
+  "schema_version": "beefex.updater.v1",
+  "product": "Beefex",
+  "identifier": "com.beefapi.beefex",
+  "version": "0.1.0-alpha.5",
+  "tag": "v0.1.0-alpha.5",
+  "channel": "alpha",
+  "notes": ["next Alpha line"],
+  "assets": {{
+    "macos-aarch64": {{
+      "file": "beefex-desktop-mac-arm64.dmg",
+      "url": "https://pub-e540a6ea6d6e4af19d7f5fc4d1f07c47.r2.dev/beefex/releases/latest/beefex-desktop-mac-arm64.dmg",
+      "sha256": "{ALPHA4_MAC}"
+    }},
+    "windows-x86_64": {{
+      "file": "beefex-desktop-win-x64.exe",
+      "url": "https://pub-e540a6ea6d6e4af19d7f5fc4d1f07c47.r2.dev/beefex/releases/latest/beefex-desktop-win-x64.exe",
+      "sha256": "{ALPHA4_WIN}"
+    }}
+  }}
+}}"#
+        )
     }
 
     #[test]
-    fn is_newer_version_strips_prerelease_suffix() {
-        // "1.0.0-beta" 截到第一个非数字 → 1.0.0；与 1.0.0 平等
-        assert!(!is_newer_version("1.0.0-beta", "1.0.0"));
-        assert!(is_newer_version("1.0.1-beta", "1.0.0"));
+    fn prerelease_versions_compare_in_alpha_order() {
+        assert!(is_newer_version("0.1.0-alpha.4", "0.1.0-alpha.3"));
+        assert!(is_newer_version("0.1.0-alpha.5", "0.1.0-alpha.4"));
+        assert!(!is_newer_version("0.1.0-alpha.5", "0.1.0-alpha.5"));
+        assert!(!is_newer_version("0.1.0-alpha.5", "0.1.1"));
     }
 
     #[test]
-    fn is_newer_version_handles_missing_patch() {
-        // "2.5" 视为 2.5.0
-        assert!(is_newer_version("2.5", "2.4.0"));
-        assert!(!is_newer_version("2.5", "2.5.0"));
+    fn version_comparator_orders_untagged_010_before_alpha_prereleases() {
+        // Comparator-only. Published Alpha 4 cannot auto-discover later builds.
+        assert!(is_newer_version("0.1.0-alpha.5", "0.1.0"));
+        assert!(is_newer_version("0.1.0-alpha.6", "0.1.0-alpha.5"));
+        assert!(!is_newer_version("0.1.0", "0.1.0-alpha.5"));
     }
 
     #[test]
-    fn is_newer_version_handles_garbage_input() {
-        // 解析失败的部分都视为 0，不 panic
-        assert!(!is_newer_version("", "1.0.0"));
-        assert!(is_newer_version("1.0.0", ""));
-        assert!(!is_newer_version("garbage", "1.0.0"));
-    }
-
-    #[test]
-    fn parse_latest_tag_from_atom_picks_first_entry() {
-        let xml = r#"<?xml version="1.0"?>
-<feed>
-  <entry>
-    <id>tag:github.com,2008:Repository/1/v2.7.5</id>
-    <title>v2.7.5</title>
-    <link rel="alternate" type="text/html" href="https://github.com/Sunnyender-org/beefex/releases/tag/v2.7.5"/>
-  </entry>
-  <entry>
-    <link rel="alternate" type="text/html" href="https://github.com/Sunnyender-org/beefex/releases/tag/v2.7.4"/>
-  </entry>
-</feed>"#;
-        assert_eq!(parse_latest_tag_from_atom(xml).as_deref(), Some("v2.7.5"));
-    }
-
-    #[test]
-    fn parse_latest_tag_from_atom_returns_none_when_absent() {
-        assert_eq!(parse_latest_tag_from_atom("<feed></feed>"), None);
-        assert_eq!(parse_latest_tag_from_atom(""), None);
-    }
-
-    #[test]
-    fn normalize_release_version_accepts_supported_versions() {
-        assert_eq!(normalize_release_version("2.8.1").as_deref(), Some("2.8.1"));
+    fn parse_sha256sums_accepts_current_alpha4_manifest() {
+        let text = format!("{ALPHA4_MAC}  beefex-desktop-mac-arm64.dmg\n{ALPHA4_WIN}  beefex-desktop-win-x64.exe\n");
+        let checksums = parse_sha256sums(&text).unwrap();
         assert_eq!(
-            normalize_release_version(" v2.8.1 ").as_deref(),
-            Some("2.8.1")
+            checksums.get("beefex-desktop-mac-arm64.dmg").unwrap(),
+            ALPHA4_MAC
         );
         assert_eq!(
-            normalize_release_version("2.8.1-rc.1").as_deref(),
-            Some("2.8.1-rc.1")
+            checksums.get("beefex-desktop-win-x64.exe").unwrap(),
+            ALPHA4_WIN
         );
     }
 
     #[test]
-    fn normalize_release_version_rejects_unsafe_or_invalid_values() {
-        for value in [
-            "",
-            "2.8",
-            "2.8.1.0",
-            "2.8.x",
-            "2.8.1/asset",
-            "2.8.1?download=1",
-            "2.8.1-",
-            "2.8.1-rc..1",
-        ] {
-            assert_eq!(normalize_release_version(value), None, "value={value}");
+    fn beefex_updater_document_is_accepted() {
+        let document = parse_beefex_updater_document(&sample_updater_json()).unwrap();
+        assert_eq!(document.version, "0.1.0-alpha.5");
+        assert_eq!(
+            document.assets.get("macos-aarch64").unwrap().file,
+            "beefex-desktop-mac-arm64.dmg"
+        );
+    }
+
+    #[test]
+    fn stale_electron_latest_json_is_rejected() {
+        let stale = r#"{
+          "product": "Beefex Desktop",
+          "version": "0.1.2",
+          "channel": "beta",
+          "commit": "86d6cc761-dirty-local",
+          "assets": {
+            "macos": { "file": "beefex-desktop-mac-arm64.dmg" }
+          }
+        }"#;
+        assert!(parse_beefex_updater_document(stale).is_none());
+    }
+
+    #[test]
+    fn latest_yml_identity_is_not_an_updater_document() {
+        assert!(parse_beefex_updater_document(
+            "version: 0.1.2\npath: beefex-desktop-mac-arm64.zip\n"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn platform_assets_match_download_page_names() {
+        assert_eq!(
+            platform_asset("macos", "aarch64").unwrap().file,
+            "beefex-desktop-mac-arm64.dmg"
+        );
+        assert_eq!(
+            platform_asset("windows", "x86_64").unwrap().file,
+            "beefex-desktop-win-x64.exe"
+        );
+        assert!(platform_asset("macos", "x86_64").is_none());
+        assert!(platform_asset("linux", "x86_64").is_none());
+    }
+
+    #[test]
+    fn alpha_artifact_receipt_is_source_traceable() {
+        let artifact = parse_alpha_artifact(
+            r#"{
+              "schema_version": "beefex.alpha-artifact.v1",
+              "tag": "v0.1.0-alpha.4",
+              "source_commit": "1f826cc44549ab02227342c74785c1c290301b13",
+              "artifact": "beefex-desktop-mac-arm64.dmg",
+              "sha256": "9887c1dddc735d39bd064473316ab4cb7cd6fe7ad4ccb3170025ba14c488b1c9"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.source_commit,
+            "1f826cc44549ab02227342c74785c1c290301b13"
+        );
+        assert!(same_sha256(&artifact.sha256, ALPHA4_MAC));
+    }
+
+    fn github_release() -> GithubRelease {
+        GithubRelease {
+            tag_name: String::new(),
+            html_url: String::new(),
+            body: String::new(),
+            published_at: String::new(),
+            draft: false,
+            assets: Vec::new(),
         }
     }
 
     #[test]
-    fn release_asset_names_follow_packaging_contract() {
+    fn github_release_picker_skips_drafts_and_picks_newest_alpha() {
+        let releases = vec![
+            GithubRelease {
+                tag_name: "v0.1.0-alpha.3".into(),
+                ..github_release()
+            },
+            GithubRelease {
+                tag_name: "v0.1.0-alpha.4".into(),
+                ..github_release()
+            },
+            GithubRelease {
+                tag_name: "v0.1.0-alpha.5".into(),
+                draft: true,
+                ..github_release()
+            },
+        ];
         assert_eq!(
-            release_asset_name_for("2.8.1", "macos", "aarch64").as_deref(),
-            Some("Beefex_2.8.1_aarch64.dmg")
-        );
-        assert_eq!(
-            release_asset_name_for("2.8.1", "macos", "x86_64").as_deref(),
-            Some("Beefex_2.8.1_x64.dmg")
-        );
-        assert_eq!(
-            release_asset_name_for("2.8.1", "windows", "x86_64").as_deref(),
-            Some("Beefex_2.8.1_x64-setup.exe")
-        );
-        assert_eq!(release_asset_name_for("2.8.1", "linux", "x86_64"), None);
-    }
-
-    #[test]
-    fn release_download_url_uses_tag_specific_public_asset_path() {
-        assert_eq!(
-            release_download_url(
-                "Sunnyender-org/beefex",
-                "2.8.1",
-                "Beefex_2.8.1_aarch64.dmg"
-            ),
-            "https://github.com/Sunnyender-org/beefex/releases/download/v2.8.1/Beefex_2.8.1_aarch64.dmg"
+            pick_latest_github_release(&releases).unwrap().tag_name,
+            "v0.1.0-alpha.4"
         );
     }
 
     #[test]
-    fn update_channel_never_inherits_legacy_upstream() {
-        assert_ne!(UPDATE_REPO, Some("ZMGID/legacy_upstream"));
+    fn install_targets_never_include_user_data_roots() {
+        assert!(path_touches_user_data(Path::new(
+            "/Users/test/Library/Application Support/com.beefapi.beefex/credentials/beefapi-managed"
+        )));
+        assert!(path_touches_user_data(Path::new(
+            r"C:\Users\test\AppData\Roaming\com.beefapi.beefex\conversations"
+        )));
+        assert!(path_touches_user_data(Path::new(
+            "/Users/test/Library/Application Support/com.beefapi.beefex/beefex-desktop-mac-arm64.dmg"
+        )));
+        assert!(path_touches_user_data(Path::new(
+            r"C:\Users\test\AppData\Roaming\com.beefapi.beefex\beefex-desktop-win-x64.exe"
+        )));
+        assert!(!path_touches_user_data(Path::new(
+            "/var/folders/xx/beefex-update-0.1.0-alpha.5-beefex-desktop-mac-arm64.dmg"
+        )));
+        assert!(!path_touches_user_data(Path::new(
+            "/Applications/Beefex.app"
+        )));
+    }
+
+    #[test]
+    fn macos_swap_plan_keeps_all_renames_in_applications() {
+        let applications = Path::new("/Applications");
+        let plan = plan_macos_swap(applications, "swap1").unwrap();
+        assert_eq!(plan.target_app, PathBuf::from("/Applications/Beefex.app"));
+        assert_eq!(
+            plan.staged_app,
+            PathBuf::from("/Applications/.Beefex.staged-swap1.app")
+        );
+        assert_eq!(
+            plan.backup_app,
+            PathBuf::from("/Applications/.Beefex.previous-swap1.app")
+        );
+        assert_eq!(
+            plan.failed_app,
+            PathBuf::from("/Applications/.Beefex.failed-swap1.app")
+        );
+        for path in [
+            &plan.staged_app,
+            &plan.target_app,
+            &plan.backup_app,
+            &plan.failed_app,
+        ] {
+            assert_eq!(path.parent(), Some(applications));
+        }
+        assert!(plan
+            .staged_app
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with('.'));
+        assert!(plan
+            .backup_app
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with('.'));
+        assert!(plan
+            .failed_app
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with('.'));
+        assert!(plan_macos_swap(applications, "../x").is_err());
+        assert!(plan_macos_swap(
+            Path::new("/Users/test/Library/Application Support/com.beefapi.beefex"),
+            "swap1",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn macos_rollback_moves_failed_target_in_the_same_directory() {
+        let moves = plan_macos_rollback(true, true).unwrap();
+        assert_eq!(
+            moves,
+            MacosRollbackMoves {
+                target_to_failed: true,
+                backup_to_target: true,
+            }
+        );
+        assert_eq!(
+            plan_macos_rollback(false, true).unwrap(),
+            MacosRollbackMoves {
+                target_to_failed: false,
+                backup_to_target: true,
+            }
+        );
+        assert!(plan_macos_rollback(true, false).is_err());
+    }
+
+    #[test]
+    fn staged_identity_requires_beefex_id_and_expected_version() {
+        assert!(
+            verify_staged_identity("com.beefapi.beefex", "0.1.0-alpha.5", "v0.1.0-alpha.5").is_ok()
+        );
+        assert!(
+            verify_staged_identity("com.apple.finder", "0.1.0-alpha.5", "0.1.0-alpha.5").is_err()
+        );
+        assert!(
+            verify_staged_identity("com.beefapi.beefex", "0.1.0-alpha.4", "0.1.0-alpha.5").is_err()
+        );
+    }
+
+    #[test]
+    fn bundle_plist_parser_reads_identifier_and_short_version() {
+        let plist = r#"
+            <dict>
+              <key>CFBundleIdentifier</key>
+              <string>com.beefapi.beefex</string>
+              <key>CFBundleShortVersionString</key>
+              <string>0.1.0-alpha.5</string>
+            </dict>
+        "#;
+        assert_eq!(
+            parse_bundle_identity(plist).unwrap(),
+            (
+                "com.beefapi.beefex".to_string(),
+                "0.1.0-alpha.5".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn discover_unique_real_app_rejects_symlinks_and_duplicates() {
+        let root =
+            std::env::temp_dir().join(format!("beefex-app-disc-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(root.join("Beefex.app")).unwrap();
+        assert_eq!(
+            discover_unique_real_app(&root)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "Beefex.app"
+        );
+        fs::create_dir_all(root.join("Other.app")).unwrap();
+        assert!(discover_unique_real_app(&root).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_unique_real_app_rejects_symlink_app() {
+        let linked =
+            std::env::temp_dir().join(format!("beefex-app-link-{}", Uuid::new_v4().simple()));
+        let target =
+            std::env::temp_dir().join(format!("beefex-app-real-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(target.join("Beefex.app")).unwrap();
+        fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(target.join("Beefex.app"), linked.join("Beefex.app")).unwrap();
+        assert!(discover_unique_real_app(&linked).is_err());
+        fs::remove_dir_all(&linked).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+    }
+
+    #[test]
+    fn sha256_helper_matches_known_empty_digest() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn normalize_release_version_accepts_alpha_tags() {
+        assert_eq!(
+            normalize_release_version("v0.1.0-alpha.5").as_deref(),
+            Some("0.1.0-alpha.5")
+        );
+        assert_eq!(normalize_release_version("0.1.0-alpha.5/asset"), None);
     }
 }

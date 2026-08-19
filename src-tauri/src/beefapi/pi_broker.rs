@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::settings::ModelProvider;
 
-use super::{provider::EphemeralModelProvider, types::REQUIRED_GROUP};
+use super::provider::EphemeralModelProvider;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -28,6 +28,10 @@ struct BrokerConfig {
 
 impl BrokerConfig {
     fn from_provider(provider: EphemeralModelProvider) -> Result<(Self, String), String> {
+        let routing_group = encode_beefex_group_header(provider.routing_group());
+        if routing_group.is_empty() {
+            return Err("managed_provider_group_missing".to_string());
+        }
         let ModelProvider {
             base_url,
             mut api_keys,
@@ -49,11 +53,25 @@ impl BrokerConfig {
             Self {
                 upstream_url,
                 credential,
-                group: REQUIRED_GROUP.to_string(),
+                group: routing_group,
             },
             model,
         ))
     }
+}
+
+fn encode_beefex_group_header(group: &str) -> String {
+    let mut encoded = String::new();
+    for byte in group.trim().bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                encoded.push(byte as char)
+            }
+            b' ' => encoded.push_str("%20"),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 pub(crate) struct PiProviderBroker {
@@ -305,8 +323,9 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     use crate::beefapi::{
-        credential_store::SecretCredential, provider::hydrate_managed_provider,
-        types::SafeAccountMetadata,
+        credential_store::SecretCredential,
+        provider::hydrate_managed_provider,
+        types::{SafeAccountMetadata, REQUIRED_GROUP},
     };
 
     const SECRET: &str = "fixture-secret-never-child-visible";
@@ -318,6 +337,7 @@ mod tests {
                 group: REQUIRED_GROUP.to_string(),
                 default_model: "gpt-5.6-sol".to_string(),
                 allowed_models: vec!["gpt-5.6-sol".to_string()],
+                model_groups: Default::default(),
                 key_name: "Beefex".to_string(),
                 base_url,
             },
@@ -370,6 +390,53 @@ mod tests {
         let request = request.await.unwrap().to_ascii_lowercase();
         assert!(request.contains(&format!("authorization: bearer {SECRET}")));
         assert!(request.contains("x-beefex-group: gpt-pro"));
+    }
+
+    #[tokio::test]
+    async fn broker_encodes_anthropic_family_group_for_the_selected_model() {
+        let (base_url, request) = mock_upstream().await;
+        let mut model_groups = std::collections::BTreeMap::new();
+        model_groups.insert("claude-fable-5".to_string(), "claude max".to_string());
+        let provider = hydrate_managed_provider(
+            &SafeAccountMetadata {
+                email: "ender@example.com".to_string(),
+                group: REQUIRED_GROUP.to_string(),
+                default_model: "gpt-5.6-sol".to_string(),
+                allowed_models: vec!["gpt-5.6-sol".to_string(), "claude-fable-5".to_string()],
+                model_groups,
+                key_name: "Beefex".to_string(),
+                base_url,
+            },
+            &SecretCredential::new(SECRET.to_string()),
+            Some("claude-fable-5"),
+        )
+        .unwrap();
+        let broker = PiProviderBroker::start(Client::new(), provider)
+            .await
+            .unwrap();
+        let response = Client::new()
+            .post(format!("{}/responses", broker.endpoint()))
+            .header("authorization", LOCAL_AUTHORIZATION)
+            .json(&serde_json::json!({ "model": broker.model(), "stream": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = request.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("x-beefex-group: claude%20max"));
+        assert_eq!(encode_beefex_group_header("claude max"), "claude%20max");
+    }
+
+    #[test]
+    fn encoded_groups_match_beefapi_query_unescape_fixtures() {
+        // Keep these strings identical to middleware.TestBeefexRequestedGroupMatchesDesktopEncoderFixtures.
+        assert_eq!(encode_beefex_group_header("gpt-pro"), "gpt-pro");
+        assert_eq!(encode_beefex_group_header("claude max"), "claude%20max");
+        assert_eq!(
+            encode_beefex_group_header("claude 特惠"),
+            "claude%20%E7%89%B9%E6%83%A0"
+        );
+        assert_eq!(encode_beefex_group_header("grok"), "grok");
     }
 
     #[tokio::test]
