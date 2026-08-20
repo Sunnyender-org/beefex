@@ -24,6 +24,10 @@ while IFS= read -r match; do
     README.md:*'modified derivative of [Kivio]'*) ;;
     NOTICE:*) ;;
     src/settings/SettingsShell.tsx:*'Kivio · GPL-3.0-or-later'*) ;;
+    src/settings/AboutOpenSourceNotice.tsx:*'Kivio · GPL-3.0-or-later'*) ;;
+    src/settings/settingsSurface.ts:*'Kivio · GPL-3.0-or-later'*) ;;
+    src/settings/settingsSurface.test.ts:*'Kivio · GPL-3.0-or-later'*) ;;
+    src/settings/AboutOpenSourceNotice.test.tsx:*'Kivio · GPL-3.0-or-later'*) ;;
     src/lens/history.ts:*"'kivio:lens-history:v1'"*) ;;
     src/chat/persistence.ts:*"'kivio-chat-"*) ;;
     src/chat/persistence.test.ts:*"'kivio-chat-"*) ;;

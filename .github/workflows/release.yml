@@ -127,14 +127,14 @@ jobs:
 
           notes="$RUNNER_TEMP/release-notes.md"
           printf '%s\n' \
-            '# Beefex macOS Alpha' \
+            '# Beefex desktop Alpha' \
             '' \
             'Unsigned Apple Silicon build for Lucas clean-machine acceptance.' \
             '' \
             '- Product runtime: bundled Pi 0.84.1' \
             "- Public source commit: ${SOURCE_COMMIT}" \
             '- Status: unsigned and not notarized; this is not a general-production release' \
-            '- Windows is not included in the v0.1 macOS Alpha gate' \
+            '- This workflow builds macOS; the matching Windows CI package may be attached from the same public source commit' \
             '' \
             'The DMG includes a fixed drag-to-Applications layout and `安装前请看我.txt` with manual and Agent-assisted test-install instructions.' \
             '' \
@@ -149,13 +149,13 @@ jobs:
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
-              --title "Beefex ${RELEASE_TAG} (unsigned macOS Alpha)" \
+              --title "Beefex ${RELEASE_TAG} (unsigned desktop Alpha)" \
               --notes-file "$notes" \
               --prerelease
           else
             gh release create "$RELEASE_TAG" \
               --target "$SOURCE_COMMIT" \
-              --title "Beefex ${RELEASE_TAG} (unsigned macOS Alpha)" \
+              --title "Beefex ${RELEASE_TAG} (unsigned desktop Alpha)" \
               --notes-file "$notes" \
               --prerelease
           fi

@@ -3,6 +3,7 @@ import { GitBranch } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { ChatImageViewer } from './ChatImageViewer'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
+import { WorkspaceReadback } from './WorkspaceReadback'
 import { PiProjectTrustDialog } from './PiProjectTrustDialog'
 import { ScopedApprovalDialog } from './ScopedApprovalDialog'
 import { PiTaskMenu } from './PiTaskMenu'
@@ -665,7 +666,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [draftForceKnowledgeSearch, setDraftForceKnowledgeSearch] = useState(false)
   const [skills, setSkills] = useState<SkillMeta[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<string[]>([])
-  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('chat')
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('general')
   const [uiLang, setUiLang] = useState<Lang>('zh')
   const [extensionsNavItem, setExtensionsNavItem] = useState<ExtensionsNavItem | null>(null)
   const [enabledTools, setEnabledTools] = useState<ChatToolDefinition[]>([])
@@ -1264,7 +1265,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }, 2500)
   }, [])
 
-  const openEmbeddedSettings = useCallback((tab: SettingsTab = 'chat') => {
+  const openEmbeddedSettings = useCallback((tab: SettingsTab = 'general') => {
     setSettingsInitialTab(tab)
     setChatView('settings')
     syncSettingsRoute()
@@ -3319,7 +3320,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       return
     }
     setExtensionsNavItem(null)
-    openEmbeddedSettings('chat')
+    openEmbeddedSettings('general')
   }, [chatView, extensionsNavItem, handleSettingsClose, openEmbeddedSettings])
 
   const handleSidebarSearchOpenChange = useCallback((open: boolean) => {
@@ -3430,10 +3431,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                 />
               )}
               <div className="flex min-w-0 items-center gap-1">
-                <div className="beef-workspace-readback" title={selectedProject?.name || (uiLang === 'en' ? 'No project selected' : '未选择项目')}>
-                  <span>{uiLang === 'en' ? 'WORKSPACE' : '工作区'}</span>
-                  <strong>{selectedProject?.name || (uiLang === 'en' ? 'No project' : '未选择项目')}</strong>
-                </div>
+                <WorkspaceReadback
+                  selectedProject={selectedProject}
+                  conversationProject={conversationProject}
+                  lang={uiLang === 'en' ? 'en' : 'zh'}
+                />
                 <div className="shrink-0" data-tauri-drag-region="false">
                   <BackgroundJobsIndicator />
                 </div>
@@ -3488,7 +3490,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       onCancel={() => void handleCancelStream()}
                       cancelVisible={streamCoarse.streaming}
                       cancelling={streamCoarse.cancelling}
-                      onOpenSettings={() => openEmbeddedSettings('chat')}
+                      onOpenSettings={() => openEmbeddedSettings('general')}
                       onOpenTools={undefined}
                       onNewChat={() => void handleNewConversation()}
                       onCompactContext={() => void handlePiCompact()}
@@ -3596,7 +3598,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     onCancel={() => void handleCancelStream()}
                     cancelVisible={streamCoarse.streaming}
                     cancelling={streamCoarse.cancelling}
-                    onOpenSettings={() => openEmbeddedSettings('chat')}
+                    onOpenSettings={() => openEmbeddedSettings('general')}
                     onOpenTools={undefined}
                     onNewChat={() => void handleNewConversation()}
                     onCompactContext={() => void handlePiCompact()}
