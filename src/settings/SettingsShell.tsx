@@ -38,9 +38,24 @@ import {
 } from '../api/settingsCache'
 import { i18n } from './i18n'
 import {
-  GeneralIcon, HotkeysIcon, TranslateIcon, LensIcon, ChatIcon, MemoryIcon, MixerIcon,
-  McpIcon, SkillIcon, WebSearchIcon, ConnectorsIcon, UsageIcon, ProvidersIcon, AboutIcon, KnowledgeIcon,
+  GeneralIcon, MemoryIcon,
+  McpIcon, SkillIcon, UsageIcon, ProvidersIcon, AboutIcon,
 } from './NavIcons'
+import { AboutOpenSourceNotice } from './AboutOpenSourceNotice'
+import { InAppUpdateActions } from './InAppUpdateActions'
+import {
+  downloadAndInstallUpdate,
+  formatInAppUpdateError,
+  inAppUpdateFailureText,
+  type InAppDownloadState,
+} from './inAppUpdate'
+import {
+  generalSettingsSubtitle,
+  isVisibleGeneralSection,
+  resolveSettingsActiveTab,
+  visibleSettingsPrimaryNavItems,
+  type SettingsTab,
+} from './settingsSurface'
 import { buildHotkey, formatHotkeyError, getPlatform, isProviderEnabled, stableStringify } from './utils'
 import { PROVIDER_PRESETS, type ProviderPreset } from './providerPresets'
 import { ModelPairSelect } from './ModelPairSelect'
@@ -68,7 +83,7 @@ import { KnowledgeBasePanel } from './KnowledgeBasePanel'
 import { WebSearchPanel } from './WebSearchPanel'
 import { ClientIntegrationsPanel } from './ClientIntegrationsPanel'
 
-export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'mcp' | 'skill' | 'webSearch' | 'connectors' | 'knowledge' | 'usage' | 'providers' | 'clientIntegrations' | 'about'
+export type { SettingsTab } from './settingsSurface'
 
 type SettingsData = SettingsType
 type MemoryLayerKey = 'l1' | 'l2'
@@ -601,12 +616,14 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [appVersion, setAppVersion] = useState('')
-  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? 'general')
+  const [activeTab, setActiveTab] = useState<SettingsTab>(() =>
+    resolveSettingsActiveTab(initialTab, hideNav),
+  )
   // 用量统计页内的二级视图：用量统计 / 请求调试（请求调试原为独立导航项，现并入用量统计）
   const [usageView, setUsageView] = useState<'stats' | 'debug'>('stats')
   useEffect(() => {
-    if (initialTab) setActiveTab(initialTab)
-  }, [initialTab])
+    setActiveTab(resolveSettingsActiveTab(initialTab, hideNav))
+  }, [hideNav, initialTab])
   const [saveError, setSaveError] = useState('')
   // 热键被占用未能注册的警告（保存已成功，只是提醒，不阻断）。
   const [saveWarning, setSaveWarning] = useState('')
@@ -650,12 +667,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   // 更新检查状态：内部 Alpha 没有发布通道时明确显示 disabled，不伪装成“已是最新”。
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'up-to-date' | 'available' | 'check-failed' | 'disabled'>('idle')
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
-  // 下载/安装两段式状态机:idle → downloading(进度条) → downloaded(显示安装按钮) → 用户点击 → 应用退出
-  // failed 时显示错误 + 重试 + 跳 GitHub 兜底
-  const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'downloaded' | 'failed'>('idle')
+  // 一次用户动作：idle → downloading(进度条) → 下载成功后立即 installUpdate。失败则 failed。
+  const [downloadState, setDownloadState] = useState<InAppDownloadState>('idle')
   const [downloadPercent, setDownloadPercent] = useState(0)
   const requestWindowFocus = useWindowInteractionFocus()
-  const [downloadedPath, setDownloadedPath] = useState('')
   const [downloadError, setDownloadError] = useState('')
   // RapidOCR 离线 OCR 状态:检查 app data 目录里 dylib + 模型 4 个文件齐不齐。
   const [rapidOcrStatus, setRapidOcrStatus] = useState<import('../api/tauri').RapidOcrStatus | null>(null)
@@ -927,7 +942,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     }
   }, [updateInfo])
 
-  /** 下载新版安装包到 temp dir,期间监听 update-download-progress 事件刷新进度条 */
+  /** 一次点击：下载安装包后立即走现有 Windows/macOS 安装命令。失败保持明确 failed。 */
   const handleDownloadAndInstall = useCallback(async () => {
     if (!updateInfo?.version) return
     setDownloadState('downloading')
@@ -938,29 +953,28 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       unlisten = await api.onUpdateDownloadProgress((p) => {
         setDownloadPercent(Math.max(0, Math.min(100, Math.round(p.percent))))
       })
-      const path = await api.downloadUpdate(updateInfo.version, updateInfo.sha256)
-      setDownloadedPath(path)
-      setDownloadState('downloaded')
+      const result = await downloadAndInstallUpdate({
+        version: updateInfo.version,
+        sha256: updateInfo.sha256,
+        downloadUpdate: api.downloadUpdate,
+        installUpdate: api.installUpdate,
+      })
+      if (!result.ok) {
+        console.error(
+          result.phase === 'download' ? 'Download update failed:' : 'Install update failed:',
+          result.error,
+        )
+        setDownloadError(inAppUpdateFailureText(result.phase, result.error, t))
+        setDownloadState('failed')
+      }
     } catch (err) {
-      console.error('Download update failed:', err)
-      setDownloadError(typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err)))
+      console.error('Download or install update failed:', err)
+      setDownloadError(inAppUpdateFailureText('download', formatInAppUpdateError(err), t))
       setDownloadState('failed')
     } finally {
       unlisten?.()
     }
-  }, [updateInfo])
-
-  /** 启动 installer 并退出当前应用。macOS 走暂存校验后的 rename 交换；Windows spawn NSIS。 */
-  const handleInstall = useCallback(async () => {
-    if (!downloadedPath) return
-    try {
-      await api.installUpdate(downloadedPath, updateInfo?.version)
-    } catch (err) {
-      console.error('Install update failed:', err)
-      setDownloadError(typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err)))
-      setDownloadState('failed')
-    }
-  }, [downloadedPath, updateInfo?.version])
+  }, [t, updateInfo])
 
   /** 拉一次 RapidOCR 状态(app data 里 dylib + 模型 4 个文件齐不齐)。
    *  挂载时 + 切换到 RapidOCR 引擎时调一下。 */
@@ -2283,27 +2297,19 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     )
   }
 
-  const navItems = [
-    { id: 'general' as const, label: t.tabGeneral, icon: GeneralIcon },
-    { id: 'hotkeys' as const, label: t.tabHotkeys, icon: HotkeysIcon },
-    { id: 'translate' as const, label: t.tabTranslation, icon: TranslateIcon },
-    { id: 'lens' as const, label: t.lensTabLabel, icon: LensIcon },
-    { id: 'chat' as const, label: t.tabChatClient, icon: ChatIcon },
-    { id: 'memory' as const, label: t.tabMemory, icon: MemoryIcon },
-    { id: 'mixer' as const, label: t.tabMixer, icon: MixerIcon },
-    { id: 'mcp' as const, label: 'MCP', icon: McpIcon },
-    { id: 'connectors' as const, label: t.tabConnectors, icon: ConnectorsIcon },
-    { id: 'knowledge' as const, label: lang === 'zh' ? '知识库' : 'Knowledge', icon: KnowledgeIcon },
-    { id: 'skill' as const, label: 'Skill', icon: SkillIcon },
-    { id: 'webSearch' as const, label: t.tabWebSearch, icon: WebSearchIcon },
-    { id: 'usage' as const, label: lang === 'zh' ? '用量统计' : 'Usage', icon: UsageIcon },
-    { id: 'providers' as const, label: t.tabModels, icon: ProvidersIcon },
-    { id: 'clientIntegrations' as const, label: lang === 'zh' ? '客户端集成' : 'Client integrations', icon: KeyRound },
-  ]
+  const settingsNavIcons = {
+    general: GeneralIcon,
+    usage: UsageIcon,
+    clientIntegrations: KeyRound,
+  } as const
+  const navItems = visibleSettingsPrimaryNavItems(lang).map((item) => ({
+    ...item,
+    icon: settingsNavIcons[item.id],
+  }))
   const pageMeta: Record<typeof activeTab, { title: string; subtitle: string; right?: string }> = {
     general: {
       title: t.tabGeneral,
-      subtitle: lang === 'zh' ? '外观、行为、归档和权限。' : 'Appearance, behavior, archive, and permissions.',
+      subtitle: generalSettingsSubtitle(lang),
     },
     translate: {
       title: t.tabTranslation,
@@ -2481,6 +2487,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {/* ===== 基础设置标签页 ===== */}
             {activeTab === 'general' && (
               <>
+                {isVisibleGeneralSection('appearance') && (
                 <SettingsGroup title={lang === 'zh' ? '外观' : 'Appearance'}>
                   <SettingRow label={t.language}>
                     <Select
@@ -2533,7 +2540,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                     </div>
                   </SettingRow>
                 </SettingsGroup>
+                )}
 
+                {isVisibleGeneralSection('behavior') && (
                 <SettingsGroup title={lang === 'zh' ? '行为' : 'Behavior'}>
                   <SettingRow label={t.launchAtStartup}>
                     <Toggle
@@ -2562,7 +2571,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                     </SettingRow>
                   )}
                 </SettingsGroup>
+                )}
 
+                {isVisibleGeneralSection('firstTimeSetup') && (
                 <SettingsGroup title={lang === 'zh' ? '首次使用' : 'First-time setup'}>
                   <SettingRow
                     label={lang === 'zh' ? '首次使用引导' : 'Setup wizard'}
@@ -2577,7 +2588,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                     </Button>
                   </SettingRow>
                 </SettingsGroup>
+                )}
 
+                {isVisibleGeneralSection('backupRestore') && (
                 <SettingsGroup title={lang === 'zh' ? '备份与恢复' : 'Backup & Restore'}>
                   <FieldBlock
                     label={lang === 'zh' ? '设置备份' : 'Settings backup'}
@@ -2610,8 +2623,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                     </div>
                   </FieldBlock>
                 </SettingsGroup>
+                )}
 
-                {permissionStatus?.platform === 'macos' && (
+                {isVisibleGeneralSection('macosPermissions') && permissionStatus?.platform === 'macos' && (
                   <SettingsGroup title={t.permissions}>
                     <PermissionItem
                       label={t.accessibilityPermission}
@@ -4574,10 +4588,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                   <SettingRow label={lang === 'zh' ? '开发者' : 'Developer'}>
                     <span className="kv-row-desc">BeefAPI Contributors</span>
                   </SettingRow>
-                  <SettingRow label={lang === 'zh' ? '上游项目' : 'Upstream'}>
-                    <span className="kv-row-desc">Kivio · GPL-3.0-or-later</span>
-                  </SettingRow>
                 </SettingsGroup>
+
+                <AboutOpenSourceNotice lang={lang} />
 
                 <SettingsGroup title={lang === 'zh' ? '支持' : 'Support'}>
                   <DiagnosticsExportPanel lang={lang} />
@@ -4632,92 +4645,24 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                         </div>
                       )}
 
-                      {downloadState === 'downloading' && (
-                        <div className="mb-3">
-                          <div className="flex items-center justify-between kv-panel-body mb-1">
-                            <span>{t.downloading}</span>
-                            <span className="font-mono tabular-nums">{downloadPercent}%</span>
-                          </div>
-                          <div className="kv-progress">
-                            <div style={{ width: `${downloadPercent}%` }} />
-                          </div>
-                        </div>
-                      )}
-
-                      {downloadState === 'failed' && downloadError && (
-                        <div className="kv-inline-error mb-3">
-                          {t.downloadFailed}: {downloadError}
-                        </div>
-                      )}
-
-                      <div className="flex gap-2 flex-wrap">
-                        {downloadState === 'idle' && (
-                          <>
-                            <Button
-                              variant="primary"
-                              onClick={handleDownloadAndInstall}
-                              data-tauri-drag-region="false"
-                            >
-                              <Download size={12} />
-                              {t.downloadAndInstall}
-                            </Button>
-                            <Button
-                              onClick={handleOpenReleasePage}
-                              data-tauri-drag-region="false"
-                            >
-                              <ExternalLink size={12} />
-                              {t.downloadFromGithub}
-                            </Button>
-                          </>
-                        )}
-                        {downloadState === 'downloading' && (
-                          <Button disabled>
-                            <RefreshCw size={12} className="animate-spin" />
-                            {t.downloading}
-                          </Button>
-                        )}
-                        {downloadState === 'downloaded' && (
-                          <Button
-                            variant="primary"
-                            onClick={handleInstall}
-                            data-tauri-drag-region="false"
-                          >
-                            <Download size={12} />
-                            {t.installAndRestart}
-                          </Button>
-                        )}
-                        {downloadState === 'failed' && (
-                          <>
-                            <Button
-                              variant="primary"
-                              onClick={handleDownloadAndInstall}
-                              data-tauri-drag-region="false"
-                            >
-                              <RefreshCw size={12} />
-                              {t.retryDownload}
-                            </Button>
-                            <Button
-                              onClick={handleOpenReleasePage}
-                              data-tauri-drag-region="false"
-                            >
-                              <ExternalLink size={12} />
-                              {t.downloadFromGithub}
-                            </Button>
-                          </>
-                        )}
-                        <Button
-                          variant="ghost"
-                          onClick={() => {
-                            setUpdateStatus('idle')
-                            setDownloadState('idle')
-                            setDownloadPercent(0)
-                            setDownloadError('')
-                          }}
-                          data-tauri-drag-region="false"
-                        >
-                          {t.updateLater}
-                        </Button>
-                      </div>
+                      <InAppUpdateActions
+                        state={downloadState}
+                        percent={downloadPercent}
+                        error={downloadError}
+                        downloadAndInstallLabel={t.downloadAndInstall}
+                        downloadingLabel={t.downloading}
+                        retryLabel={t.retryDownload}
+                        openDownloadPageLabel={t.downloadFromGithub}
+                        laterLabel={t.updateLater}
+                        onDownloadAndInstall={() => void handleDownloadAndInstall()}
+                        onOpenReleasePage={() => void handleOpenReleasePage()}
+                        onLater={() => {
+                          setUpdateStatus('idle')
+                          setDownloadState('idle')
+                          setDownloadPercent(0)
+                          setDownloadError('')
+                        }}
+                      />
                     </div>
                   )}
                 </SettingsGroup>

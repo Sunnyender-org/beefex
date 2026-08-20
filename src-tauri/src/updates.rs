@@ -1,7 +1,9 @@
-use std::{collections::HashMap, fs, io::Write, path::Path};
-
-#[cfg(any(target_os = "macos", test))]
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
@@ -725,6 +727,181 @@ fn restore_macos_backup(plan: &MacosSwapPlan) -> Result<(), String> {
         .map_err(|e| format!("回滚上一版 Beefex.app 失败: {e}"))
 }
 
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_SILENT_NSIS_ARG: &str = "/S";
+
+#[cfg(test)]
+const WINDOWS_CURRENT_PROCESS_EXIT_WAIT_SECS: u32 = 120;
+
+#[cfg(test)]
+const WINDOWS_CURRENT_PROCESS_EXIT_TIMEOUT_MARKER: &str = "current_process_exit_timeout";
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsSilentUpdatePlan {
+    installer: PathBuf,
+    current_exe: PathBuf,
+    relaunch_exe: PathBuf,
+    installer_args: Vec<String>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_silent_nsis_args() -> Vec<String> {
+    vec![WINDOWS_SILENT_NSIS_ARG.to_string()]
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn args_request_application_data_deletion(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let trimmed = arg.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        trimmed == "/P"
+            || trimmed == "/p"
+            || lower == "-p"
+            || lower.contains("purge")
+            || lower.contains("delete-application-data")
+            || lower.contains("delete_application_data")
+            || lower.contains("delete-appdata")
+            || lower.contains("delete_appdata")
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn ensure_windows_installer_args_safe(args: &[String]) -> Result<(), String> {
+    if args.len() != 1 || args[0] != WINDOWS_SILENT_NSIS_ARG {
+        return Err("Windows 静默安装参数必须恰好是 /S".to_string());
+    }
+    if args_request_application_data_deletion(args) {
+        return Err("拒绝带数据删除参数的安装".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn plan_windows_silent_update(
+    installer: &Path,
+    current_exe: &Path,
+) -> Result<WindowsSilentUpdatePlan, String> {
+    if !installer.exists() {
+        return Err(format!("安装包不存在: {}", installer.display()));
+    }
+    if path_touches_user_data(installer) {
+        return Err("拒绝从用户数据目录安装".to_string());
+    }
+    if current_exe.as_os_str().is_empty() {
+        return Err("无法解析当前 Beefex 路径".to_string());
+    }
+    if !current_exe.exists() {
+        return Err(format!("当前 Beefex 不存在: {}", current_exe.display()));
+    }
+    if path_touches_user_data(current_exe) {
+        return Err("拒绝从用户数据目录启动当前 Beefex".to_string());
+    }
+    let installer_args = windows_silent_nsis_args();
+    ensure_windows_installer_args_safe(&installer_args)?;
+    Ok(WindowsSilentUpdatePlan {
+        installer: installer.to_path_buf(),
+        current_exe: current_exe.to_path_buf(),
+        relaunch_exe: current_exe.to_path_buf(),
+        installer_args,
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_silent_update_waiter_script() -> &'static str {
+    r#"
+$ErrorActionPreference = 'Stop'
+$appPid = [int]$env:BEEFEX_UPDATE_PID
+$installer = $env:BEEFEX_UPDATE_INSTALLER
+$relaunch = $env:BEEFEX_UPDATE_RELAUNCH
+$failure = $env:BEEFEX_UPDATE_FAILURE
+$nsisArgs = $env:BEEFEX_UPDATE_NSIS_ARGS
+if (-not $installer -or -not $relaunch -or -not $failure -or -not $nsisArgs) {
+  exit 1
+}
+if ($nsisArgs -cne '/S') {
+  Set-Content -LiteralPath $failure -Value 'invalid_installer_args' -Encoding ascii
+  exit 1
+}
+$deadline = (Get-Date).AddSeconds(120)
+while ($true) {
+  if (-not (Get-Process -Id $appPid -ErrorAction SilentlyContinue)) {
+    break
+  }
+  if ((Get-Date) -ge $deadline) {
+    Set-Content -LiteralPath $failure -Value 'current_process_exit_timeout' -Encoding ascii
+    exit 1
+  }
+  Start-Sleep -Seconds 1
+}
+try {
+  $p = Start-Process -FilePath $installer -ArgumentList $nsisArgs -Wait -PassThru
+} catch {
+  Set-Content -LiteralPath $failure -Value 'installer_spawn_failed' -Encoding ascii
+  exit 1
+}
+if ($null -eq $p) {
+  Set-Content -LiteralPath $failure -Value 'installer_spawn_failed' -Encoding ascii
+  exit 1
+}
+if ($p.ExitCode -ne 0) {
+  Set-Content -LiteralPath $failure -Value ('installer_exit=' + $p.ExitCode) -Encoding ascii
+  exit $p.ExitCode
+}
+try {
+  $null = Start-Process -FilePath $relaunch
+} catch {
+  Set-Content -LiteralPath $failure -Value 'relaunch_failed' -Encoding ascii
+  exit 1
+}
+if (Test-Path -LiteralPath $failure) {
+  Remove-Item -LiteralPath $failure -Force -ErrorAction SilentlyContinue
+}
+exit 0
+"#
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_silent_update_waiter(
+    plan: &WindowsSilentUpdatePlan,
+    current_pid: u32,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    use crate::proc::CREATE_NO_WINDOW;
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let failure_record = std::env::temp_dir().join("beefex-update-failure.txt");
+    if path_touches_user_data(&failure_record) {
+        return Err("拒绝把更新失败记录写进用户数据目录".to_string());
+    }
+    if plan.relaunch_exe != plan.current_exe {
+        return Err("Windows 重启动路径必须是当前 Beefex".to_string());
+    }
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        windows_silent_update_waiter_script(),
+    ])
+    .env("BEEFEX_UPDATE_PID", current_pid.to_string())
+    .env("BEEFEX_UPDATE_INSTALLER", &plan.installer)
+    .env("BEEFEX_UPDATE_RELAUNCH", &plan.relaunch_exe)
+    .env("BEEFEX_UPDATE_FAILURE", &failure_record)
+    .env("BEEFEX_UPDATE_NSIS_ARGS", plan.installer_args.join(" "))
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    cmd.spawn()
+        .map_err(|e| format!("启动静默更新等待进程失败: {e}"))?;
+    Ok(())
+}
+
 /// 下载新版本安装包到 OS temp dir，边下边校验 SHA-256，并 emit "update-download-progress"。
 #[tauri::command]
 pub(crate) async fn download_update_asset(
@@ -826,6 +1003,7 @@ fn detach_dmg(mount_str: &str, mount_point: &Path) {
 
 /// 启动安装包并退出当前应用。
 /// macOS：只读挂载 → 暂存校验 → rename 交换；失败回滚备份。不删 Application Support / AppData。
+/// Windows：校验路径后拉起内置 PowerShell 等待进程，退出当前应用，以恰好 `/S` 静默安装，成功后再启动已安装 Beefex。不传数据删除参数。
 #[tauri::command]
 pub(crate) fn install_update_and_quit(
     app: AppHandle,
@@ -946,11 +1124,11 @@ pub(crate) fn install_update_and_quit(
 
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
         let _ = version;
-        Command::new(&path)
-            .spawn()
-            .map_err(|e| format!("启动 installer 失败: {e}"))?;
+        let current_exe =
+            std::env::current_exe().map_err(|e| format!("无法解析当前 Beefex 路径: {e}"))?;
+        let plan = plan_windows_silent_update(p, &current_exe)?;
+        spawn_windows_silent_update_waiter(&plan, std::process::id())?;
         app.exit(0);
         return Ok(());
     }
@@ -1301,5 +1479,104 @@ mod tests {
             Some("0.1.0-alpha.5")
         );
         assert_eq!(normalize_release_version("0.1.0-alpha.6/asset"), None);
+    }
+
+    fn temp_windows_update_files() -> (PathBuf, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("beefex-win-update-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).unwrap();
+        let installer = root.join("beefex-desktop-win-x64.exe");
+        let exe = root.join("Beefex.exe");
+        fs::write(&installer, b"installer").unwrap();
+        fs::write(&exe, b"beefex").unwrap();
+        (root, installer, exe)
+    }
+
+    #[test]
+    fn windows_silent_plan_uses_exact_nsis_s_flag_and_preserves_data() {
+        let (root, installer, exe) = temp_windows_update_files();
+        let plan = plan_windows_silent_update(&installer, &exe).unwrap();
+        assert_eq!(plan.installer_args, vec!["/S".to_string()]);
+        assert_ne!(plan.installer_args, vec!["/s".to_string()]);
+        assert!(ensure_windows_installer_args_safe(&plan.installer_args).is_ok());
+        assert!(!args_request_application_data_deletion(
+            &plan.installer_args
+        ));
+        assert_eq!(plan.relaunch_exe, exe);
+        assert_eq!(plan.current_exe, exe);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn windows_installer_args_reject_data_deletion_flags() {
+        assert!(args_request_application_data_deletion(&[
+            "/S".into(),
+            "/P".into()
+        ]));
+        assert!(args_request_application_data_deletion(&[
+            "/S".into(),
+            "/purge".into()
+        ]));
+        assert!(args_request_application_data_deletion(&[
+            "--delete-application-data".into()
+        ]));
+        assert!(!args_request_application_data_deletion(&["/S".into()]));
+        assert!(ensure_windows_installer_args_safe(&["/S".into(), "/P".into()]).is_err());
+        assert!(ensure_windows_installer_args_safe(&["/s".into()]).is_err());
+    }
+
+    #[test]
+    fn windows_silent_plan_rejects_user_data_and_missing_paths() {
+        let (root, installer, exe) = temp_windows_update_files();
+        let missing_installer = root.join("missing-setup.exe");
+        assert!(plan_windows_silent_update(&missing_installer, &exe).is_err());
+        let missing_exe = root.join("missing-beefex.exe");
+        assert!(plan_windows_silent_update(&installer, &missing_exe).is_err());
+
+        let data_root = root.join("com.beefapi.beefex");
+        fs::create_dir_all(&data_root).unwrap();
+        let data_installer = data_root.join("setup.exe");
+        fs::write(&data_installer, b"installer").unwrap();
+        assert!(plan_windows_silent_update(&data_installer, &exe).is_err());
+
+        let data_exe = data_root.join("Beefex.exe");
+        fs::write(&data_exe, b"beefex").unwrap();
+        assert!(plan_windows_silent_update(&installer, &data_exe).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn windows_waiter_script_is_bounded_silent_and_success_only() {
+        let script = windows_silent_update_waiter_script();
+        let timeout_at = script
+            .find(WINDOWS_CURRENT_PROCESS_EXIT_TIMEOUT_MARKER)
+            .expect("timeout marker");
+        let installer_at = script
+            .find("Start-Process -FilePath $installer")
+            .expect("installer launch");
+        let nonzero_at = script
+            .find("$p.ExitCode -ne 0")
+            .expect("non-zero installer exit");
+        let relaunch_at = script
+            .find("Start-Process -FilePath $relaunch")
+            .expect("relaunch");
+
+        assert!(script.contains("-cne '/S'"));
+        assert!(script.contains("ArgumentList $nsisArgs"));
+        assert!(script.contains(&format!(
+            "AddSeconds({WINDOWS_CURRENT_PROCESS_EXIT_WAIT_SECS})"
+        )));
+        assert!(script.contains("Start-Sleep -Seconds 1"));
+        assert!(!script.contains("Wait-Process"));
+        assert!(timeout_at < installer_at);
+        assert!(installer_at < nonzero_at);
+        assert!(nonzero_at < relaunch_at);
+        assert!(script.contains("exit 1"));
+        assert!(!script.contains("/P"));
+        assert!(!script.to_ascii_lowercase().contains("purge"));
+        assert!(!script
+            .to_ascii_lowercase()
+            .contains("delete-application-data"));
+        assert!(!script.to_ascii_lowercase().contains("delete_appdata"));
     }
 }

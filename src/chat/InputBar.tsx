@@ -43,6 +43,7 @@ import {
 } from './slashCommands'
 import { mapExternalCliSlashCommands, externalCliAgentLabel } from './externalCliSlashCommands'
 import { isTauriRuntime } from './utils'
+import { resolveWorkspaceProject } from './workspaceProject'
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif']
 
@@ -499,8 +500,7 @@ export function InputBar({
   const projectEntryEnabled = Boolean(showProjectEntry && onSelectProject)
   // 项目按钮的显示态：优先导航选中的项目；否则回退到当前会话自身的项目（有名才算），
   // 这样从「最近」打开一条属于项目的对话时，按钮仍能显示该项目。
-  const effectiveProject: { id: string; name: string } | null =
-    selectedProject ?? (conversationProject?.name ? conversationProject : null)
+  const effectiveProject = resolveWorkspaceProject(selectedProject, conversationProject)
   // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮 + 清除按钮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
   const modeEntryEnabled = Boolean(onAgentPlanModeChange)

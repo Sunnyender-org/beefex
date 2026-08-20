@@ -69,11 +69,11 @@ function take(args, name) {
 const isMain = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url
 if (isMain) {
   const args = process.argv.slice(2)
-  const version = take(args, '--version') || '0.1.0-alpha.6'
+  const version = take(args, '--version') || '0.1.0-alpha.7'
   const commit = take(args, '--commit') || ''
   const sumsPath = take(args, '--sha256sums')
   if (!sumsPath) {
-    throw new Error('usage: build-beefex-updater-metadata.mjs --sha256sums SHA256SUMS.txt [--version 0.1.0-alpha.6] [--commit <release-commit>]')
+    throw new Error('usage: build-beefex-updater-metadata.mjs --sha256sums SHA256SUMS.txt [--version 0.1.0-alpha.7] [--commit <release-commit>]')
   }
   const checksums = parseSha256sums(readFileSync(sumsPath, 'utf8'))
   process.stdout.write(`${JSON.stringify(buildUpdaterDocument({ version, commit, checksums }), null, 2)}\n`)
